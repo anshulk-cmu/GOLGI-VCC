@@ -147,8 +147,8 @@
 - Least-connections: better load balancing but no resource awareness
 - Kubernetes default scheduler: bin-packing based on resource requests — static, doesn't adapt to runtime contention
 - Harvest VMs (Ambati et al. 2020): use spare capacity but no latency guarantees
-- Kraken (Wen et al. 2023): cold-start aware scheduling but doesn't address overcommitment
-- ENSURE (Du et al. 2020): SLO-aware but reactive (responds to violations after they happen)
+- Kraken (Wen et al. 2021): cold-start aware scheduling but doesn't address overcommitment
+- ENSURE (Suresh et al. 2020): SLO-aware but reactive (responds to violations after they happen)
 - Gap: no existing system combines (a) proactive ML prediction with (b) overcommitment-aware routing and (c) adaptive safety nets
 -->
 
@@ -640,15 +640,15 @@ Paragraph 6: Future work (1-2 sentences pointing to Section 7.5)
 
 1. Li, S., Wang, W., Yang, J., Chen, G., & Lu, D. (2023). Golgi: Performance-Aware, Resource-Efficient Function Scheduling for Serverless Computing. *Proceedings of the ACM Symposium on Cloud Computing (SoCC '23)*. https://doi.org/10.1145/3620678.3624645
 
-2. Shahrad, M., Fung, R., Gruber, N., et al. (2020). Serverless in the Wild: Characterizing and Optimizing the Serverless Workload at a Large Cloud Provider. *USENIX ATC '20*.
+2. Shahrad, M., Fung, R., Gruber, N., Goiri, I., Chaudhry, G., Cooke, J., Laureano, E., Tresness, C., Russinovich, M., & Bianchini, R. (2020). Serverless in the Wild: Characterizing and Optimizing the Serverless Workload at a Large Cloud Provider. *USENIX ATC '20*. https://www.usenix.org/conference/atc20/presentation/shahrad
 
-3. Lakshminarayanan, B., Roy, D. M., & Teh, Y. W. (2014). Mondrian Forests: Efficient Online Random Forests. *NeurIPS 2014*.
+3. Lakshminarayanan, B., Roy, D. M., & Teh, Y. W. (2014). Mondrian Forests: Efficient Online Random Forests. *Advances in Neural Information Processing Systems (NeurIPS) 27*. https://arxiv.org/abs/1406.2673
 
-4. Ambati, P., Goiri, I., Frujeri, F., et al. (2020). Providing SLOs for Resource-Harvesting VMs in Cloud Platforms. *OSDI '20*.
+4. Ambati, P., Goiri, I., Frujeri, F., Gun, A., Wang, K., Dolan, B., Corell, B., Pasupuleti, S., Moscibroda, T., Elnikety, S., Fontoura, M., & Bianchini, R. (2020). Providing SLOs for Resource-Harvesting VMs in Cloud Platforms. *14th USENIX Symposium on Operating Systems Design and Implementation (OSDI '20)*. https://www.usenix.org/conference/osdi20/presentation/ambati
 
-5. Wen, J., et al. (2023). Kraken: Adaptive Container Provisioning for Deploying Dynamic DAGs in Serverless Platforms. *SoCC '23*.
+5. Wen, J., Chen, Z., Jin, Y., & Liu, H. (2021). Kraken: Adaptive Container Provisioning for Deploying Dynamic DAGs in Serverless Platforms. *ACM SoCC '21*. https://doi.org/10.1145/3472883.3486992
 
-6. Du, D., et al. (2020). ENSURE: Efficient Scheduling and Autonomous Resource Management in Serverless Environments. *IEEE TPDS*.
+6. Suresh, A., Somashekar, G., Varadarajan, A., Kakarla, V.R., Upadhyay, H.R., & Gandhi, A. (2020). ENSURE: Efficient Scheduling and Autonomous Resource Management in Serverless Environments. *IEEE ACSOS 2020*. https://doi.org/10.1109/ACSOS49614.2020.00036
 
 7. k3s — Lightweight Kubernetes. https://k3s.io/
 
@@ -658,7 +658,7 @@ Paragraph 6: Future work (1-2 sentences pointing to Section 7.5)
 
 10. Azure Functions Trace 2019. https://github.com/Azure/AzurePublicDataset
 
-11. Pedregosa, F., et al. (2011). Scikit-learn: Machine Learning in Python. *JMLR 12*.
+11. Pedregosa, F., Varoquaux, G., Gramfort, A., Michel, V., Thirion, B., Grisel, O., Blondel, M., Prettenhofer, P., Weiss, R., Dubourg, V., Vanderplas, J., Passos, A., Cournapeau, D., Brucher, M., Perrot, M., & Duchesnay, E. (2011). Scikit-learn: Machine Learning in Python. *Journal of Machine Learning Research, 12*, 2825–2830. https://jmlr.org/papers/v12/pedregosa11a.html
 
 12. Linux Kernel cgroup v2 Documentation. https://docs.kernel.org/admin-guide/cgroup-v2.html
 
