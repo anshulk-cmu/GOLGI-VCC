@@ -1,11 +1,12 @@
-# Golgi Replication — Execution Log
+# Golgi Replication — Execution Log: Phase 0
 
 > **Plan document:** [`GOLGI_REPLICATION_PLAN.md`](GOLGI_REPLICATION_PLAN.md)
+> **Next phase:** [`execution_log_phase1.md`](execution_log_phase1.md)
 > **Course:** CSL7510 — Cloud Computing
 > **Student:** Anshul Kumar (M25AI2036)
 > **Started:** 2026-04-11
 
-This document tracks the actual execution of each step from the replication plan. Every command, output, resource ID, and reasoning is recorded here for reproducibility, debugging, and grading reference.
+This document tracks the execution of Phase 0 — AWS Infrastructure Setup. Every command, output, resource ID, and reasoning is recorded here for reproducibility, debugging, and grading reference.
 
 ---
 
@@ -16,9 +17,13 @@ This document tracks the actual execution of each step from the replication plan
   - [Step 0.2: Install AWS CLI](#step-02-install-aws-cli--completed-2026-04-11)
   - [Step 0.3: Generate SSH Key Pair](#step-03-generate-ssh-key-pair--completed-2026-04-11)
   - [Steps 0.4–0.9: Network Setup](#steps-049-network-setup--completed-2026-04-11)
-  - [Steps 0.10–0.11: EC2 Instance Provisioning](#step-01011-ec2-instance-provisioning--not-started)
-  - [Steps 0.12–0.15: k3s Cluster Setup](#steps-01215-k3s-cluster-setup--not-started)
-  - [Steps 0.16–0.17: OpenFaaS Deployment](#steps-01617-openfaas-deployment--not-started)
+  - [Steps 0.10–0.11: EC2 Instance Provisioning](#step-01011-ec2-instance-provisioning--completed-2026-04-11)
+  - [Steps 0.12–0.15: k3s Cluster Setup](#steps-01215-k3s-cluster-setup--completed-2026-04-11)
+  - [Steps 0.16–0.17: OpenFaaS Deployment](#steps-01617-openfaas-deployment--completed-2026-04-11)
+  - [Step 0.18: Python and Monitoring Tools on Workers](#step-018-install-python-and-monitoring-tools-on-worker-nodes--completed-2026-04-11)
+  - [Step 0.19: Python and ML Packages on Master](#step-019-install-python-and-ml-packages-on-master-node--completed-2026-04-11)
+  - [cgroup Version Verification](#cgroup-version-verification--completed-2026-04-11)
+  - [Phase 0 Checkpoint](#phase-0-checkpoint--all-passed-2026-04-11)
 - [Resource Reference Table](#resource-reference-table)
 
 ---
@@ -47,6 +52,15 @@ A quick-reference of all AWS resources created so far. Updated as new resources 
 | EC2: LoadGen | `i-07b31e765e0ff1b45` | `golgi-loadgen` / t3.medium / `10.0.1.142` / `44.211.68.203` |
 | k3s Version | `v1.34.6+k3s1` | Kubernetes v1.34.6, containerd 2.2.2 |
 | k3s Join Token | `K107e34f...acbde` | Stored at `/var/lib/rancher/k3s/server/node-token` on master |
+| Helm | `v3.20.2` | Installed at `/usr/local/bin/helm` on master |
+| OpenFaaS | Revision 1 | Deployed via Helm into `openfaas` namespace |
+| OpenFaaS Gateway | `http://127.0.0.1:31112` | NodePort 31112, admin / `888c7417424edcbe2a7de236be0fa023` |
+| faas-cli | `v0.18.8` | Installed at `/usr/local/bin/faas-cli` on master |
+| Python | `3.9.25` | Pre-installed on all nodes (Amazon Linux 2023 base) |
+| pip | `21.3.1` | Installed via `yum` on all nodes |
+| perf | `6.1.166` | Installed on 3 workers for hardware perf counters |
+| gcc | `11.5.0` | Installed on master + loadgen for C extension compilation |
+| cgroup version | v2 (`cgroup2fs`) | Unified hierarchy at `/sys/fs/cgroup/` |
 
 ---
 
@@ -1769,4 +1783,793 @@ These pods run on the master by default and are managed by k3s — we do not nee
 
 ---
 
-#### Steps 0.16–0.17: OpenFaaS Deployment — NOT STARTED
+#### Step 0.16: Install OpenFaaS via Helm — COMPLETED (2026-04-11)
+
+**What we did:** Installed Helm, added the OpenFaaS chart repository, created the required Kubernetes namespaces, generated a gateway authentication secret, and deployed OpenFaaS onto the k3s cluster.
+
+**Why OpenFaaS?** The Golgi paper uses OpenFaaS as its serverless platform. It runs on any Kubernetes cluster, provides per-function container isolation (important for our OC/Non-OC resource experiments), and exposes Prometheus metrics out of the box — which we need for Phase 2 (Metric Collector).
+
+**Pre-flight check — Cluster health:**
+
+Before installing anything, we confirmed the k3s cluster was healthy:
+
+```bash
+[ec2-user@golgi-master ~]$ kubectl get nodes -o wide
+```
+```
+NAME             STATUS   ROLES           AGE   VERSION        INTERNAL-IP   EXTERNAL-IP   OS-IMAGE                        KERNEL-VERSION                    CONTAINER-RUNTIME
+golgi-master     Ready    control-plane   19m   v1.34.6+k3s1   10.0.1.131    <none>        Amazon Linux 2023.11.20260406   6.1.166-197.305.amzn2023.x86_64   containerd://2.2.2-bd1.34
+golgi-worker-1   Ready    <none>          17m   v1.34.6+k3s1   10.0.1.110    <none>        Amazon Linux 2023.11.20260406   6.1.166-197.305.amzn2023.x86_64   containerd://2.2.2-bd1.34
+golgi-worker-2   Ready    <none>          16m   v1.34.6+k3s1   10.0.1.10     <none>        Amazon Linux 2023.11.20260406   6.1.166-197.305.amzn2023.x86_64   containerd://2.2.2-bd1.34
+golgi-worker-3   Ready    <none>          14m   v1.34.6+k3s1   10.0.1.94     <none>        Amazon Linux 2023.11.20260406   6.1.166-197.305.amzn2023.x86_64   containerd://2.2.2-bd1.34
+```
+
+All 4 nodes are `Ready`. Proceeding with OpenFaaS installation.
+
+---
+
+**Sub-step 1: Install Helm 3**
+
+Helm is the package manager for Kubernetes. OpenFaaS provides an official Helm chart, which is the recommended installation method. Helm was not pre-installed on our Amazon Linux 2023 AMI.
+
+```bash
+[ec2-user@golgi-master ~]$ curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+```
+```
+[WARNING] Could not find git. It is required for plugin installation.
+Downloading https://get.helm.sh/helm-v3.20.2-linux-amd64.tar.gz
+Verifying checksum... Done.
+Preparing to install helm into /usr/local/bin
+helm installed into /usr/local/bin/helm
+```
+
+Helm v3.20.2 installed. The git warning is harmless — we won't need Helm plugins.
+
+---
+
+**Sub-step 2: Add OpenFaaS Helm chart repository**
+
+```bash
+[ec2-user@golgi-master ~]$ helm repo add openfaas https://openfaas.github.io/faas-netes/
+```
+```
+"openfaas" has been added to your repositories
+```
+
+```bash
+[ec2-user@golgi-master ~]$ helm repo update
+```
+```
+Hang tight while we grab the latest from your chart repositories...
+...Successfully got an update from the "openfaas" chart repository
+Update Complete. ⎈Happy Helming!⎈
+```
+
+---
+
+**Sub-step 3: Create Kubernetes namespaces**
+
+OpenFaaS requires two namespaces:
+- `openfaas` — for the core components (gateway, prometheus, NATS, etc.)
+- `openfaas-fn` — for the deployed functions (our benchmark functions will live here)
+
+```bash
+[ec2-user@golgi-master ~]$ kubectl apply -f https://raw.githubusercontent.com/openfaas/faas-netes/master/namespaces.yml
+```
+```
+namespace/openfaas created
+namespace/openfaas-fn created
+```
+
+---
+
+**Sub-step 4: Generate gateway password and create Kubernetes secret**
+
+The OpenFaaS gateway uses HTTP Basic Auth. We generate a random 32-character password from `/dev/urandom` and store it as a Kubernetes secret so the gateway pods can read it at runtime.
+
+```bash
+[ec2-user@golgi-master ~]$ OPENFAAS_PASSWORD=$(head -c 16 /dev/urandom | sha256sum | head -c 32)
+[ec2-user@golgi-master ~]$ echo "OPENFAAS_PASSWORD=$OPENFAAS_PASSWORD"
+```
+```
+OPENFAAS_PASSWORD=888c7417424edcbe2a7de236be0fa023
+```
+
+```bash
+[ec2-user@golgi-master ~]$ kubectl -n openfaas create secret generic basic-auth \
+  --from-literal=basic-auth-user=admin \
+  --from-literal=basic-auth-password="$OPENFAAS_PASSWORD"
+```
+```
+secret/basic-auth created
+```
+
+---
+
+**Sub-step 5: Install OpenFaaS via Helm**
+
+This is the main installation step. We use `helm upgrade --install` which either installs fresh or upgrades an existing release (idempotent).
+
+**First attempt — failed:**
+
+```bash
+[ec2-user@golgi-master ~]$ helm upgrade openfaas --install openfaas/openfaas \
+  --namespace openfaas \
+  --set functionNamespace=openfaas-fn \
+  --set generateBasicAuth=false \
+  --set gateway.replicas=1 \
+  --set queueWorker.replicas=1 \
+  --set basic_auth=true \
+  --set serviceType=NodePort
+```
+```
+Error: Kubernetes cluster unreachable: Get "http://localhost:8080/version": dial tcp 127.0.0.1:8080: connect: connection refused
+```
+
+**Why it failed:** Helm could not find the Kubernetes API server. k3s stores its kubeconfig at `/etc/rancher/k3s/k3s.yaml`, and `kubectl` finds it automatically (k3s configures this via a symlink/alias), but Helm does not — it falls back to the default `localhost:8080`, which is not where k3s runs its API server.
+
+**Fix:** Export the `KUBECONFIG` environment variable pointing to the k3s config file:
+
+```bash
+[ec2-user@golgi-master ~]$ export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+```
+
+**Second attempt — succeeded:**
+
+```bash
+[ec2-user@golgi-master ~]$ helm upgrade openfaas --install openfaas/openfaas \
+  --namespace openfaas \
+  --set functionNamespace=openfaas-fn \
+  --set generateBasicAuth=false \
+  --set gateway.replicas=1 \
+  --set queueWorker.replicas=1 \
+  --set basic_auth=true \
+  --set serviceType=NodePort
+```
+```
+Release "openfaas" does not exist. Installing it now.
+NAME: openfaas
+LAST DEPLOYED: Sat Apr 11 22:28:08 2026
+NAMESPACE: openfaas
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+To verify that openfaas has started, run:
+
+  kubectl -n openfaas get deployments -l "release=openfaas, app=openfaas"
+```
+
+**Helm flags explained:**
+
+| Flag | Value | Why |
+|---|---|---|
+| `--namespace openfaas` | Install into the `openfaas` namespace we just created |
+| `--set functionNamespace=openfaas-fn` | Deploy user functions into a separate namespace for isolation |
+| `--set generateBasicAuth=false` | We already created the `basic-auth` secret manually (sub-step 4) |
+| `--set gateway.replicas=1` | Single gateway replica (sufficient for our scale) |
+| `--set queueWorker.replicas=1` | Single queue worker for async invocations |
+| `--set basic_auth=true` | Enable authentication on the gateway |
+| `--set serviceType=NodePort` | Expose the gateway on a static port (`31112`) on every node — this lets us access it via `<any-node-ip>:31112` without needing an external load balancer |
+
+---
+
+**Sub-step 6: Wait for gateway rollout**
+
+```bash
+[ec2-user@golgi-master ~]$ kubectl -n openfaas rollout status deployment/gateway
+```
+```
+deployment "gateway" successfully rolled out
+```
+
+The gateway pod is running and ready to accept requests.
+
+---
+
+**Sub-step 7: Install faas-cli**
+
+`faas-cli` is the command-line tool for interacting with OpenFaaS — deploying functions, invoking them, checking status, etc. We will use it heavily in Phase 1.
+
+```bash
+[ec2-user@golgi-master ~]$ curl -sL https://cli.openfaas.com | sudo sh
+```
+```
+Finding latest version from GitHub
+0.18.8
+Downloading package https://github.com/openfaas/faas-cli/releases/download/0.18.8/faas-cli as /tmp/faas-cli
+Download complete.
+
+Running with sufficient permissions to attempt to move faas-cli to /usr/local/bin
+New version of faas-cli installed to /usr/local/bin
+Creating alias 'faas' for 'faas-cli'.
+  ___                   _____           ____
+ / _ \ _ __   ___ _ __ |  ___|_ _  __ _/ ___|
+| | | | '_ \ / _ \ '_ \| |_ / _` |/ _` \___ \
+| |_| | |_) |  __/ | | |  _| (_| | (_| |___) |
+ \___/| .__/ \___|_| |_|_|  \__,_|\__,_|____/
+      |_|
+
+CLI:
+ commit:  bf309592e77386f69cada2f4ceecac9f35f6d206
+ version: 0.18.8
+```
+
+faas-cli v0.18.8 installed. Both `faas-cli` and the alias `faas` are available.
+
+---
+
+**Sub-step 8: Login to OpenFaaS gateway**
+
+```bash
+[ec2-user@golgi-master ~]$ export OPENFAAS_URL=http://127.0.0.1:31112
+[ec2-user@golgi-master ~]$ echo -n '888c7417424edcbe2a7de236be0fa023' | faas-cli login --username admin --password-stdin
+```
+```
+Calling the OpenFaaS server to validate the credentials...
+credentials saved for admin http://127.0.0.1:31112
+```
+
+faas-cli successfully authenticated against the gateway. Credentials are stored in `~/.openfaas/config.yml` for subsequent commands.
+
+---
+
+**Sub-step 9: Persist KUBECONFIG for future sessions**
+
+To avoid the Helm `KUBECONFIG` error in future SSH sessions, we added the export to `~/.bashrc`:
+
+```bash
+[ec2-user@golgi-master ~]$ echo 'export KUBECONFIG=/etc/rancher/k3s/k3s.yaml' >> ~/.bashrc
+```
+
+This means every new shell session on the master will automatically have `KUBECONFIG` set correctly for both `kubectl` and `helm`.
+
+**OpenFaaS deployments created:**
+
+| Deployment | Ready | Purpose |
+|---|---|---|
+| `gateway` | 1/1 | API gateway — receives function invocations, routes to function pods |
+| `prometheus` | 1/1 | Metrics collection — scrapes function and gateway metrics |
+| `alertmanager` | 1/1 | Alert routing (used by OpenFaaS auto-scaling) |
+| `nats` | 1/1 | Message queue for async function invocations |
+| `queue-worker` | 1/1 | Processes async invocations from the NATS queue |
+
+**Credentials (save these):**
+
+| Item | Value |
+|---|---|
+| Gateway URL | `http://127.0.0.1:31112` (on master) |
+| Gateway URL (from workers) | `http://10.0.1.131:31112` |
+| Username | `admin` |
+| Password | `888c7417424edcbe2a7de236be0fa023` |
+
+---
+
+#### Step 0.17: Verify OpenFaaS — COMPLETED (2026-04-11)
+
+**Verification 1: List deployed functions**
+
+This should return an empty list since we haven't deployed any functions yet. If it responds at all, it confirms the gateway is running and faas-cli credentials are valid.
+
+```bash
+[ec2-user@golgi-master ~]$ export OPENFAAS_URL=http://127.0.0.1:31112
+[ec2-user@golgi-master ~]$ faas-cli list
+```
+```
+Function                      	Invocations    	Replicas
+```
+
+Empty list — exactly as expected. The gateway responded and faas-cli is authenticated.
+
+---
+
+**Verification 2: Gateway health endpoint**
+
+The `/healthz` endpoint returns HTTP 200 if the gateway is healthy. We use `-sv` (silent + verbose) to see the HTTP status code.
+
+```bash
+[ec2-user@golgi-master ~]$ curl -sv http://127.0.0.1:31112/healthz
+```
+```
+*   Trying 127.0.0.1:31112...
+* Connected to 127.0.0.1 (127.0.0.1) port 31112 (#0)
+> GET /healthz HTTP/1.1
+> Host: 127.0.0.1:31112
+> User-Agent: curl/8.5.0
+> Accept: */*
+>
+< HTTP/1.1 200 OK
+< Content-Length: 0
+< Date: Sat, 11 Apr 2026 22:28:43 GMT
+<
+* Connection #0 to host 127.0.0.1:31112 left intact
+```
+
+HTTP 200 OK — gateway is healthy.
+
+---
+
+**Verification 3: All OpenFaaS deployments**
+
+```bash
+[ec2-user@golgi-master ~]$ kubectl -n openfaas get deployments -l "release=openfaas,app=openfaas"
+```
+```
+NAME           READY   UP-TO-DATE   AVAILABLE   AGE
+alertmanager   1/1     1            1           29s
+gateway        1/1     1            1           29s
+nats           1/1     1            1           29s
+prometheus     1/1     1            1           29s
+queue-worker   1/1     1            1           29s
+```
+
+All 5 deployments are `1/1 READY`:
+
+| Component | What it does | Why we need it |
+|---|---|---|
+| **gateway** | HTTP API gateway — all function invocations go through this. Exposes port 31112 via NodePort. | Core component. Our Golgi router (Phase 4) will call functions through this gateway. |
+| **prometheus** | Scrapes metrics from the gateway and function pods every 5 seconds. | We will query Prometheus in Phase 2 for OpenFaaS-level metrics like invocation count, duration, and in-flight requests. |
+| **alertmanager** | Routes alerts from Prometheus (e.g., function failure thresholds). | Used internally by OpenFaaS auto-scaling. We won't configure custom alerts but it's required. |
+| **nats** | Lightweight message broker for asynchronous function invocations. | If we invoke functions asynchronously (fire-and-forget), NATS queues the request. |
+| **queue-worker** | Pulls messages from NATS and forwards them to function pods. | Works in tandem with NATS for async processing. |
+
+---
+
+**Result:** Steps 0.16–0.17 are complete. OpenFaaS is fully operational on our k3s cluster. The serverless platform is ready to receive function deployments in Phase 1.
+
+---
+
+#### Step 0.18: Install Python and Monitoring Tools on Worker Nodes — COMPLETED (2026-04-11)
+
+**What we did:** Installed Python 3, pip, and the `perf` performance monitoring tool via `yum` on all 3 worker nodes. Then installed the Python packages needed by the metric collector (Phase 2): `flask`, `requests`, `psutil`, and `numpy`.
+
+**Why these packages?**
+
+| Package | Version Installed | Why we need it |
+|---|---|---|
+| `python3` | 3.9.25 | Already pre-installed on Amazon Linux 2023, but we needed to verify the version |
+| `python3-pip` | 21.3.1 | Package installer — not pre-installed on Amazon Linux 2023 |
+| `perf` | 6.1.166 | Linux performance monitoring tool — the Golgi paper uses hardware performance counters (cache misses, instructions per cycle) via `perf stat`. We will use this in Phase 2 for collecting CPU-level metrics from running containers |
+| `flask` | 3.1.3 | Web framework — the metric collector agent on each worker runs as a Flask HTTP server that responds to metric queries from the master |
+| `requests` | 2.25.1 | HTTP client — the metric collector uses this to push collected metrics to the master node |
+| `psutil` | 7.2.2 | System monitoring library — provides CPU usage, memory usage, disk I/O, and network I/O per-process. Easier than parsing `/proc` files manually |
+| `numpy` | 2.0.2 | Numerical computing — used for metric aggregation (mean, percentile calculations) before sending to the master |
+
+**Also installed as dependencies:** `libxcrypt-compat` (required by pip).
+
+**Sub-step 1: Install system packages via yum (all 3 workers in parallel)**
+
+```bash
+# Ran on all 3 workers simultaneously:
+# worker-1 (54.173.219.56), worker-2 (44.206.236.146), worker-3 (174.129.77.19)
+
+[ec2-user@golgi-worker-1 ~]$ sudo yum install -y python3 python3-pip perf
+```
+```
+...
+Installed:
+  libxcrypt-compat-4.4.33-7.amzn2023.x86_64
+  perf-1:6.1.166-197.305.amzn2023.x86_64
+  python3-pip-21.3.1-2.amzn2023.0.16.noarch
+
+Complete!
+```
+
+All 3 workers produced identical output — `python3` was already installed (part of the base AMI), so `yum` only needed to install `python3-pip`, `perf`, and the `libxcrypt-compat` dependency.
+
+---
+
+**Sub-step 2: Install Python packages via pip (all 3 workers in parallel)**
+
+```bash
+[ec2-user@golgi-worker-1 ~]$ pip3 install --user flask requests psutil numpy
+```
+```
+...
+Installing collected packages: zipp, markupsafe, werkzeug, jinja2, itsdangerous,
+  importlib-metadata, greenlet, click, blinker, psutil, numpy, flask
+Successfully installed blinker-1.9.0 click-8.1.8 flask-3.1.3 importlib-metadata-8.7.1
+  itsdangerous-2.2.0 jinja2-3.1.6 markupsafe-3.0.3 numpy-2.0.2 psutil-7.2.2
+  werkzeug-3.1.8 zipp-3.23.0
+```
+
+The `--user` flag installs packages into `~/.local/lib/python3.9/site-packages/` rather than system-wide, which avoids needing `sudo` and keeps the system Python clean. The `requests` package (2.25.1) was already installed system-wide as a dependency of the AWS CLI, so pip skipped it.
+
+All 3 workers produced identical output. Identical package versions across all workers is important — it ensures the metric collector behaves the same regardless of which worker it runs on.
+
+---
+
+**Sub-step 3: Verify installations on all workers**
+
+```bash
+[ec2-user@golgi-worker-1 ~]$ python3 --version
+Python 3.9.25
+
+[ec2-user@golgi-worker-1 ~]$ pip3 show flask psutil numpy requests | grep -E '^(Name|Version)'
+Name: Flask
+Version: 3.1.3
+Name: psutil
+Version: 7.2.2
+Name: numpy
+Version: 2.0.2
+Name: requests
+Version: 2.25.1
+```
+
+Workers 2 and 3 returned identical output — same Python version (3.9.25) and same package versions.
+
+---
+
+**Sub-step 4: Verify perf tool**
+
+```bash
+[ec2-user@golgi-worker-1 ~]$ perf --version
+perf version 6.1.166-197.305.amzn2023.x86_64
+```
+
+The `perf` version matches the kernel version (6.1.166) — this is correct. `perf` is tightly coupled to the kernel, so version alignment is essential.
+
+---
+
+#### Step 0.19: Install Python and ML Packages on Master Node — COMPLETED (2026-04-11)
+
+**What we did:** Installed Python 3 pip, C build tools (gcc, python3-devel, libffi-devel), and then the Python packages needed for the ML module (Phase 3), the router (Phase 4), and the load generator (Phase 6).
+
+**Why these packages?**
+
+| Package | Version Installed | Why we need it |
+|---|---|---|
+| `flask` | 3.1.3 | The Golgi router (Phase 4) runs as a Flask HTTP server |
+| `requests` | 2.32.5 | The router calls the OpenFaaS gateway via HTTP |
+| `numpy` | 2.0.2 | Numerical operations in the ML pipeline |
+| `scikit-learn` | 1.6.1 | ML framework — the Golgi classifier is a Mondrian Forest (random forest variant). scikit-learn provides `RandomForestClassifier` as our simplified substitute |
+| `pandas` | 2.3.3 | Data manipulation — loading and processing the training data CSV files |
+| `matplotlib` | 3.9.4 | Plotting — generating the evaluation graphs in Phase 9 (latency CDFs, cost comparisons, etc.) |
+| `locust` | 2.34.0 | Load testing framework — used in Phase 6 to replay Azure Function traces and generate realistic request patterns |
+
+**Sub-step 1: Install pip on master**
+
+```bash
+[ec2-user@golgi-master ~]$ sudo yum install -y python3 python3-pip
+```
+```
+...
+Installed:
+  libxcrypt-compat-4.4.33-7.amzn2023.x86_64
+  python3-pip-21.3.1-2.amzn2023.0.16.noarch
+
+Complete!
+```
+
+---
+
+**Sub-step 2: First attempt to install Python packages — FAILED**
+
+```bash
+[ec2-user@golgi-master ~]$ pip3 install --user flask requests numpy scikit-learn pandas matplotlib locust
+```
+```
+...
+  subprocess.CalledProcessError: Command '(cd "/tmp/pip-install-540vx4yf/
+    gevent_7c1e0f92a2b94e06844e29ce8f8b05aa/deps/libev" && sh ./configure -C
+    > configure-output.txt )' returned non-zero exit status 1.
+  ----------------------------------------
+  ERROR: Failed building wheel for gevent
+Failed to build gevent
+ERROR: Could not build wheels for gevent, which is required to install pyproject.toml-based projects
+```
+
+**Why it failed:** `locust` depends on `gevent`, which depends on `greenlet`, which is a C extension that compiles native code. The compilation failed because `gcc` (the C compiler) and `python3-devel` (Python header files needed for C extensions) were not installed on the master node.
+
+**Why wasn't this needed on the workers?** Because the worker packages (`flask`, `psutil`, `numpy`, `requests`) are either pure Python or have pre-built binary wheels on PyPI. `gevent` does not have a pre-built wheel for our Python 3.9 + Amazon Linux combination, so pip tried to compile from source — and failed without a compiler.
+
+---
+
+**Sub-step 3: Install C build dependencies**
+
+```bash
+[ec2-user@golgi-master ~]$ sudo yum install -y gcc python3-devel libffi-devel
+```
+```
+...
+Installed:
+  binutils-2.39-6.amzn2023.0.9.x86_64
+  binutils-gold-2.39-6.amzn2023.0.9.x86_64
+  cpp-11.5.0-5.amzn2023.0.5.x86_64
+  gc-8.0.4-5.amzn2023.0.2.x86_64
+  gcc-11.5.0-5.amzn2023.0.5.x86_64
+  gcc-plugin-annobin-11.5.0-5.amzn2023.0.5.x86_64
+  glibc-devel-2.34-231.amzn2023.0.3.x86_64
+  glibc-headers-x86-2.34-231.amzn2023.0.3.noarch
+  guile22-2.2.7-2.amzn2023.0.3.x86_64
+  kernel-headers-1:6.1.166-197.305.amzn2023.x86_64
+  libffi-devel-3.4.4-1.amzn2023.0.1.x86_64
+  libmpc-1.2.1-2.amzn2023.0.2.x86_64
+  libtool-ltdl-2.4.7-1.amzn2023.0.3.x86_64
+  libxcrypt-devel-4.4.33-7.amzn2023.x86_64
+  make-1:4.3-5.amzn2023.0.2.x86_64
+  python3-devel-3.9.25-1.amzn2023.0.3.x86_64
+
+Complete!
+```
+
+| Package | Why |
+|---|---|
+| `gcc` 11.5.0 | C compiler — needed to compile `gevent`'s C extensions |
+| `python3-devel` 3.9.25 | Python header files (`Python.h`) — required when compiling C extensions that interface with Python |
+| `libffi-devel` 3.4.4 | Foreign Function Interface headers — needed by `cffi`, a common dependency of cryptographic and low-level packages |
+
+---
+
+**Sub-step 4: Second attempt — SUCCEEDED**
+
+```bash
+[ec2-user@golgi-master ~]$ pip3 install --user flask requests numpy scikit-learn pandas matplotlib locust
+```
+```
+Building wheels for collected packages: gevent
+  Building wheel for gevent (pyproject.toml): started
+  Building wheel for gevent (pyproject.toml): still running...
+  Building wheel for gevent (pyproject.toml): finished with status 'done'
+  Created wheel for gevent: filename=gevent-26.4.0-cp39-cp39-linux_x86_64.whl
+    size=6091943
+    sha256=df1230fbce9121f9779e73b95177897d99239e79a2d127258063a1a164fa4d26
+  Stored in directory: /home/ec2-user/.cache/pip/wheels/dd/d2/3f/...
+Successfully built gevent
+Installing collected packages: zipp, setuptools, markupsafe, zope.interface,
+  zope.event, werkzeug, jinja2, itsdangerous, importlib-metadata, greenlet,
+  click, blinker, numpy, gevent, flask, charset-normalizer, certifi, brotli,
+  tzdata, typing-extensions, tomli, threadpoolctl, scipy, requests, pyzmq,
+  python-dateutil, pyparsing, psutil, pillow, packaging, msgpack, kiwisolver,
+  joblib, importlib-resources, geventhttpclient, fonttools, flask-login,
+  flask-cors, cycler, contourpy, configargparse, scikit-learn, pandas,
+  matplotlib, locust
+ERROR: pip's dependency resolver does not currently take into account all the
+  packages that are installed. This behaviour is the source of the following
+  dependency conflicts.
+awscli 2.33.15 requires python-dateutil<=2.9.0,>=2.1, but you have
+  python-dateutil 2.9.0.post0 which is incompatible.
+Successfully installed blinker-1.9.0 brotli-1.2.0 certifi-2026.2.25
+  charset-normalizer-3.4.7 click-8.1.8 configargparse-1.7.5 contourpy-1.3.0
+  cycler-0.12.1 flask-3.1.3 flask-cors-6.0.2 flask-login-0.6.3
+  fonttools-4.60.2 gevent-26.4.0 geventhttpclient-2.3.9 greenlet-3.2.5
+  importlib-metadata-8.7.1 importlib-resources-6.5.2 itsdangerous-2.2.0
+  jinja2-3.1.6 joblib-1.5.3 kiwisolver-1.4.7 locust-2.34.0 markupsafe-3.0.3
+  matplotlib-3.9.4 msgpack-1.1.2 numpy-2.0.2 packaging-26.0 pandas-2.3.3
+  pillow-11.3.0 psutil-7.2.2 pyparsing-3.3.2 python-dateutil-2.9.0.post0
+  pyzmq-27.1.0 requests-2.32.5 scikit-learn-1.6.1 scipy-1.13.1
+  setuptools-82.0.1 threadpoolctl-3.6.0 tomli-2.4.1 typing-extensions-4.15.0
+  tzdata-2026.1 werkzeug-3.1.8 zipp-3.23.0 zope.event-6.0 zope.interface-8.0.1
+```
+
+**Note on the `python-dateutil` warning:** pip reports that `awscli 2.33.15` wants `python-dateutil<=2.9.0` but we installed `2.9.0.post0`. This is a trivially incompatible version (a post-release of 2.9.0) and will not cause any issues. The AWS CLI is only used locally for provisioning — it's not involved in our experiment at all.
+
+**Note on `gevent` build time:** The `gevent` wheel took about 60 seconds to compile. pip cached the built wheel at `~/.cache/pip/wheels/`, so if we ever need to reinstall, it will be instant.
+
+---
+
+**Sub-step 5: Verify installations on master**
+
+```bash
+[ec2-user@golgi-master ~]$ python3 --version
+Python 3.9.25
+
+[ec2-user@golgi-master ~]$ pip3 show flask requests numpy scikit-learn pandas matplotlib locust | grep -E '^(Name|Version)'
+Name: Flask
+Version: 3.1.3
+Name: requests
+Version: 2.32.5
+Name: numpy
+Version: 2.0.2
+Name: scikit-learn
+Version: 1.6.1
+Name: pandas
+Version: 2.3.3
+Name: matplotlib
+Version: 3.9.4
+Name: locust
+Version: 2.34.0
+```
+
+All 7 packages installed successfully with the expected versions.
+
+---
+
+**Sub-step 6: Install locust on the load generator node**
+
+The plan mentions locust on the master, but the load generator (`golgi-loadgen` / `44.211.68.203`) is where we will actually run load tests from (Phase 6). We installed locust there too for flexibility.
+
+```bash
+[ec2-user@golgi-loadgen ~]$ sudo yum install -y python3-pip gcc python3-devel libffi-devel
+```
+```
+...
+Installed:
+  ...gcc-11.5.0-5.amzn2023.0.5.x86_64
+  ...python3-devel-3.9.25-1.amzn2023.0.3.x86_64
+  ...python3-pip-21.3.1-2.amzn2023.0.16.noarch
+  ...make-1:4.3-5.amzn2023.0.2.x86_64
+
+Complete!
+```
+
+```bash
+[ec2-user@golgi-loadgen ~]$ pip3 install --user locust requests
+```
+```
+...
+  Building wheel for gevent (pyproject.toml): finished with status 'done'
+  Created wheel for gevent: filename=gevent-26.4.0-cp39-cp39-linux_x86_64.whl
+    size=6091891
+    sha256=9298e8d2abcf807cb8eab16fff2c569d856fa2a5aba1cf3d1b9b11005db2856d
+Successfully built gevent
+Installing collected packages: zipp, setuptools, markupsafe, zope.interface,
+  zope.event, werkzeug, jinja2, itsdangerous, importlib-metadata, greenlet,
+  click, blinker, gevent, flask, charset-normalizer, certifi, brotli,
+  typing-extensions, tomli, requests, pyzmq, psutil, msgpack, geventhttpclient,
+  flask-login, flask-cors, configargparse, locust
+Successfully installed blinker-1.9.0 brotli-1.2.0 certifi-2026.2.25
+  charset-normalizer-3.4.7 click-8.1.8 configargparse-1.7.5 flask-3.1.3
+  flask-cors-6.0.2 flask-login-0.6.3 gevent-26.4.0 geventhttpclient-2.3.9
+  greenlet-3.2.5 importlib-metadata-8.7.1 itsdangerous-2.2.0 jinja2-3.1.6
+  locust-2.34.0 markupsafe-3.0.3 msgpack-1.1.2 psutil-7.2.2 pyzmq-27.1.0
+  requests-2.32.5 setuptools-82.0.1 tomli-2.4.1 typing-extensions-4.15.0
+  werkzeug-3.1.8 zipp-3.23.0 zope.event-6.0 zope.interface-8.0.1
+```
+
+---
+
+#### cgroup Version Verification — COMPLETED (2026-04-11)
+
+**Why this matters:** The Golgi paper collects per-container resource metrics (CPU, memory, I/O) by reading cgroup files. Linux has two cgroup versions:
+
+- **cgroup v1** (pre-2022): Each resource controller (cpu, memory, blkio) has its own directory hierarchy under `/sys/fs/cgroup/<controller>/`. The paper was likely developed on this version.
+- **cgroup v2** (2022+): A unified hierarchy — all controllers are in a single tree under `/sys/fs/cgroup/`. Amazon Linux 2023 uses cgroup v2.
+
+The metric collection paths in Phase 2 will depend on which version is running.
+
+```bash
+[ec2-user@golgi-worker-1 ~]$ stat -fc %T /sys/fs/cgroup/
+cgroup2fs
+```
+
+**Result: cgroup v2** (as expected for Amazon Linux 2023).
+
+```bash
+[ec2-user@golgi-worker-1 ~]$ ls /sys/fs/cgroup/
+```
+```
+cgroup.controllers
+cgroup.max.depth
+cgroup.max.descendants
+cgroup.pressure
+cgroup.procs
+cgroup.stat
+cgroup.subtree_control
+cgroup.threads
+cpu.pressure
+cpu.stat
+cpuset.cpus.effective
+cpuset.mems.effective
+dev-hugepages.mount
+dev-mqueue.mount
+init.scope
+io.cost.model
+io.cost.qos
+io.pressure
+io.stat
+kubepods.slice
+memory.numa_stat
+memory.pressure
+memory.reclaim
+memory.stat
+misc.capacity
+sys-fs-fuse-connections.mount
+sys-kernel-config.mount
+sys-kernel-debug.mount
+sys-kernel-tracing.mount
+system.slice
+user.slice
+```
+
+**Key observations for Phase 2:**
+
+| cgroup v2 file | What it provides | Golgi metric it maps to |
+|---|---|---|
+| `cpu.stat` | CPU usage time in microseconds | CPU utilization |
+| `memory.stat` | Memory usage breakdown (anon, file, slab, etc.) | Memory utilization |
+| `io.stat` | Block I/O bytes read/written per device | Disk I/O |
+| `cpu.pressure` | CPU pressure stall information (PSI) | CPU contention indicator |
+| `memory.pressure` | Memory pressure stall information | Memory contention indicator |
+
+The `kubepods.slice` directory is where k3s places its container cgroups. In Phase 2, we will navigate into this directory to find per-container cgroup files at paths like:
+```
+/sys/fs/cgroup/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod<UID>.slice/cri-containerd-<container-ID>.scope/
+```
+
+---
+
+#### Phase 0 Checkpoint — ALL PASSED (2026-04-11)
+
+The plan specifies a checklist of items to verify before moving to Phase 1. Here is the full checkpoint with results:
+
+```bash
+[ec2-user@golgi-master ~]$ kubectl get nodes
+```
+```
+NAME             STATUS   ROLES           AGE   VERSION
+golgi-master     Ready    control-plane   33m   v1.34.6+k3s1
+golgi-worker-1   Ready    <none>          32m   v1.34.6+k3s1
+golgi-worker-2   Ready    <none>          31m   v1.34.6+k3s1
+golgi-worker-3   Ready    <none>          29m   v1.34.6+k3s1
+```
+
+```bash
+[ec2-user@golgi-master ~]$ kubectl -n openfaas get pods
+```
+```
+NAME                            READY   STATUS    RESTARTS      AGE
+alertmanager-fb97cfc46-shcnk    1/1     Running   0             13m
+gateway-5f8bf55dfb-2n59b        2/2     Running   1 (13m ago)   13m
+nats-5bf8cfb54-vr2c5            1/1     Running   0             13m
+prometheus-85cb68fd7b-vmfvh     1/1     Running   0             13m
+queue-worker-65bc696bcf-sd5rn   1/1     Running   1 (13m ago)   13m
+```
+
+```bash
+[ec2-user@golgi-master ~]$ export OPENFAAS_URL=http://127.0.0.1:31112
+[ec2-user@golgi-master ~]$ faas-cli list
+```
+```
+Function                      	Invocations    	Replicas
+```
+
+```bash
+[ec2-user@golgi-master ~]$ curl -s -o /dev/null -w 'HTTP %{http_code}' http://127.0.0.1:31112/healthz
+HTTP 200
+```
+
+**Checklist results:**
+
+| # | Check | Status | Evidence |
+|---|---|---|---|
+| 1 | AWS VPC, subnet, and security group created | PASS | `vpc-0613c37c5cde4ea3c`, `subnet-059304ec96b5a1958`, `sg-06b976c1028e80262` |
+| 2 | 5 EC2 instances running | PASS | All 5 in `running` state (verified via `aws ec2 describe-instances`) |
+| 3 | k3s cluster operational with 4 nodes (1 server + 3 agents) | PASS | All 4 nodes `Ready`, Kubernetes v1.34.6 |
+| 4 | OpenFaaS installed and gateway accessible | PASS | 5/5 deployments `Ready`, gateway returns HTTP 200 |
+| 5 | faas-cli authenticated | PASS | `faas-cli list` returns successfully |
+| 6 | Python + dependencies installed on all nodes | PASS | Python 3.9.25 on all nodes; workers have flask/psutil/numpy/requests; master has scikit-learn/pandas/matplotlib/locust; loadgen has locust |
+| 7 | cgroup version identified | PASS | cgroup v2 (`cgroup2fs`) on Amazon Linux 2023 |
+| 8 | All SSH connections working | PASS | Successfully SSH'd to all 5 nodes during this session |
+| 9 | All private IPs recorded | PASS | See Resource Reference Table at top of this document |
+
+**All 9 checks passed. Phase 0 is COMPLETE.**
+
+---
+
+### Software versions summary (all nodes)
+
+| Software | Version | Location |
+|---|---|---|
+| Amazon Linux | 2023.11.20260406 | All 5 nodes |
+| Kernel | 6.1.166-197.305.amzn2023 | All 5 nodes |
+| Python | 3.9.25 | All 5 nodes |
+| pip | 21.3.1 | All 5 nodes |
+| k3s / Kubernetes | v1.34.6+k3s1 | Master + 3 workers |
+| containerd | 2.2.2 | Master + 3 workers |
+| Helm | 3.20.2 | Master only |
+| faas-cli | 0.18.8 | Master only |
+| OpenFaaS | Revision 1 (Helm) | Master (gateway runs here) |
+| gcc | 11.5.0 | Master + loadgen (for compiling C extensions) |
+| perf | 6.1.166 | 3 workers only |
+| locust | 2.34.0 | Master + loadgen |
+| scikit-learn | 1.6.1 | Master only |
+| pandas | 2.3.3 | Master only |
+| matplotlib | 3.9.4 | Master only |
+| flask | 3.1.3 | All 5 nodes (master, 3 workers, loadgen) |
+| psutil | 7.2.2 | 3 workers + master + loadgen |
+| numpy | 2.0.2 | 3 workers + master |
+
+---
+
+**Phase 0 is complete. Ready to proceed to Phase 1 — Benchmark Functions.**

@@ -32,7 +32,9 @@
 19. [Appendix D — Mathematical Foundations](#19-appendix-d--mathematical-foundations)
 20. [Appendix E — References and Resources](#20-appendix-e--references-and-resources)
 
-> **Execution Log:** Step-by-step execution details with commands, outputs, and reasoning are tracked separately in [`execution_log.md`](execution_log.md).
+> **Execution Logs:** Step-by-step execution details with commands, outputs, and reasoning are tracked separately per phase:
+> - Phase 0 (Infrastructure): [`execution_log_phase0.md`](execution_log_phase0.md)
+> - Phase 1 (Benchmark Functions): [`execution_log_phase1.md`](execution_log_phase1.md)
 
 ---
 
