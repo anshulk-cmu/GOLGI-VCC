@@ -1,0 +1,91 @@
+version: 1.0
+provider:
+  name: openfaas
+  gateway: http://127.0.0.1:31112
+
+functions:
+  image-resize:
+    lang: python3-http
+    handler: ./functions/image-resize
+    image: golgi/image-resize:latest
+    environment:
+      write_timeout: 60s
+      read_timeout: 60s
+      exec_timeout: 60s
+      max_inflight: 4
+    requests:
+      memory: 512Mi
+      cpu: "1000m"
+    limits:
+      memory: 512Mi
+      cpu: "1000m"
+
+  image-resize-oc:
+    lang: python3-http
+    handler: ./functions/image-resize
+    image: golgi/image-resize:latest
+    environment:
+      write_timeout: 60s
+      read_timeout: 60s
+      exec_timeout: 60s
+      max_inflight: 4
+    requests:
+      memory: 210Mi
+      cpu: "405m"
+    limits:
+      memory: 210Mi
+      cpu: "405m"
+
+  db-query:
+    lang: python3-http
+    handler: ./functions/db-query
+    image: golgi/db-query:latest
+    environment:
+      REDIS_HOST: redis.openfaas-fn.svc.cluster.local
+      max_inflight: 4
+    requests:
+      memory: 256Mi
+      cpu: "500m"
+    limits:
+      memory: 256Mi
+      cpu: "500m"
+
+  db-query-oc:
+    lang: python3-http
+    handler: ./functions/db-query
+    image: golgi/db-query:latest
+    environment:
+      REDIS_HOST: redis.openfaas-fn.svc.cluster.local
+      max_inflight: 4
+    requests:
+      memory: 105Mi
+      cpu: "185m"
+    limits:
+      memory: 105Mi
+      cpu: "185m"
+
+  log-filter:
+    lang: go-http
+    handler: ./functions/log-filter
+    image: golgi/log-filter:latest
+    environment:
+      max_inflight: 4
+    requests:
+      memory: 256Mi
+      cpu: "500m"
+    limits:
+      memory: 256Mi
+      cpu: "500m"
+
+  log-filter-oc:
+    lang: go-http
+    handler: ./functions/log-filter
+    image: golgi/log-filter:latest
+    environment:
+      max_inflight: 4
+    requests:
+      memory: 98Mi
+      cpu: "206m"
+    limits:
+      memory: 98Mi
+      cpu: "206m"

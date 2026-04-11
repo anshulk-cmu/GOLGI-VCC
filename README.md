@@ -134,15 +134,29 @@ The system operates as a closed feedback loop across four stages:
 │   ├── analysis/
 │   │   └── golgi-socc23-audit.md    # Paper-code audit and analysis
 │   └── final_report.md              # Final course report (in progress)
-├── infra/                           # AWS infrastructure scripts (coming)
-├── functions/                       # Benchmark serverless functions (coming)
-│   ├── image-resize/                #   CPU-bound: PIL image processing
-│   ├── db-query/                    #   I/O-bound: Redis read/write
-│   └── log-filter/                  #   Mixed: regex parsing + filtering (Go)
-├── collector/                       # Metric collection DaemonSet (coming)
-├── ml/                              # ML classifier module (coming)
-├── router/                          # Golgi routing logic (coming)
-└── loadgen/                         # Locust load generation scripts (coming)
+├── infrastructure/                  # AWS infrastructure scripts
+│   ├── setup-vpc.sh                 #   VPC, subnet, IGW, route table, security group
+│   ├── launch-instances.sh          #   EC2 instance provisioning (5 nodes)
+│   ├── install-k3s-master.sh        #   k3s server setup on master
+│   ├── install-k3s-worker.sh        #   k3s agent join for workers
+│   ├── install-openfaas.sh          #   Helm + OpenFaaS + faas-cli + node labels
+│   └── teardown.sh                  #   Full cleanup (instances, VPC, networking)
+├── functions/                       # Benchmark serverless functions
+│   ├── stack.yml                    #   OpenFaaS deployment config (6 function variants)
+│   ├── redis-deployment.yaml        #   Redis K8s manifest for db-query
+│   ├── image-resize/                #   CPU-bound: PIL Lanczos resampling
+│   │   ├── handler.py
+│   │   └── requirements.txt
+│   ├── db-query/                    #   I/O-bound: Redis GET/SET operations
+│   │   ├── handler.py
+│   │   └── requirements.txt
+│   └── log-filter/                  #   Mixed: regex parsing + IP anonymization (Go)
+│       ├── handler.go
+│       └── go.mod
+├── collector/                       # Metric collection DaemonSet (Phase 2)
+├── ml/                              # ML classifier module (Phase 3)
+├── router/                          # Golgi routing logic (Phase 4)
+└── loadgen/                         # Locust load generation scripts (Phase 6)
 ```
 
 ## Progress
@@ -153,7 +167,10 @@ The system operates as a closed feedback loop across four stages:
 - [x] Phase 0: k3s cluster (1 server + 3 agents) operational
 - [x] Phase 0: OpenFaaS deployed via Helm (gateway, prometheus, NATS, queue-worker)
 - [x] Phase 0: Python + dependencies installed on all nodes, cgroup v2 verified
-- [ ] Phase 1: Benchmark functions (3 functions x 2 variants = 6 deployments)
+- [x] Phase 1.1: Redis deployed to openfaas-fn namespace (PING verified)
+- [x] Phase 1.2: Function code written (image-resize, db-query, log-filter)
+- [ ] Phase 1.3: Build and deploy 6 function variants to OpenFaaS
+- [ ] Phase 1.4: Baseline P95 latency measurement (SLO thresholds)
 - [ ] Phase 2: Metric collector (cgroup v2 DaemonSet)
 - [ ] Phase 3: ML module (Random Forest classifier)
 - [ ] Phase 4: Router (Nginx + Python prediction sidecar)
@@ -163,6 +180,41 @@ The system operates as a closed feedback loop across four stages:
 - [ ] Phase 8: Evaluation and metrics collection
 - [ ] Phase 9: Results analysis and visualization
 - [ ] Phase 10: Report writing and demo
+
+## Benchmark Functions
+
+Phase 1 implements three serverless functions, each chosen to represent a distinct resource profile found in production serverless workloads. The paper categorizes functions by which resource bottleneck dominates their latency, and our three benchmarks cover the major categories:
+
+**image-resize (CPU-bound):** Generates a random RGB image at the requested resolution (default 1920×1080), then downscales it to half size using Pillow's Lanczos resampling algorithm. Lanczos is computationally expensive — it applies a windowed sinc interpolation kernel across every output pixel, making execution time directly proportional to available CPU cycles. When this function runs on an OC instance with reduced CPU (405m instead of 1000m), latency increases predictably with CPU contention, giving the ML classifier a clear signal to learn from.
+
+**db-query (I/O-bound):** Connects to a Redis instance running in the same Kubernetes namespace and performs a read-write-read sequence (GET → SET → GET). The function's latency is dominated by network round-trips to Redis, not by CPU processing. On an OC instance with reduced resources (185m CPU, 105 Mi memory), the function behaves almost identically to the Non-OC variant under normal conditions — network latency is independent of CPU allocation. Degradation only appears under extreme memory pressure or when TCP socket buffers are constrained, which is exactly the kind of subtle boundary the classifier must learn.
+
+**log-filter (Mixed CPU + I/O):** Written in Go for variety and to match the paper's multi-language setup. Generates 1000 synthetic log lines, applies regex matching to filter ERROR/WARN/CRITICAL entries, then runs IP anonymization (string splitting and replacement) on each match. This exercises both CPU (regex engine, string manipulation) and memory (holding 1000 strings, building the filtered output). The mixed profile creates a more complex decision surface for the classifier — sometimes CPU contention matters, sometimes memory pressure matters, and sometimes neither does.
+
+Each function is deployed in two variants: **Non-OC** (full resources) and **OC** (overcommitted). The OC resource allocations use the paper's formula `OC = 0.3 × claimed + 0.7 × actual_usage`, which weights actual measured usage more heavily than the user's claim. This produces aggressive but data-driven resource reduction — for example, image-resize claims 512 Mi memory but actually uses ~80 Mi, so the OC allocation is only 210 Mi (a 59% reduction).
+
+## Overcommitment Resource Calculations
+
+| Function | Claimed Memory | Actual Usage | OC Memory | Reduction |
+|---|---|---|---|---|
+| image-resize | 512 Mi | ~80 Mi | 210 Mi (0.3×512 + 0.7×80) | 59% |
+| db-query | 256 Mi | ~40 Mi | 105 Mi (0.3×256 + 0.7×40) | 59% |
+| log-filter | 256 Mi | ~30 Mi | 98 Mi (0.3×256 + 0.7×30) | 62% |
+
+The same formula applies to CPU: image-resize drops from 1000m to 405m, db-query from 500m to 185m, log-filter from 500m to 206m. These reductions are the source of cost savings — if the ML classifier can correctly predict when OC instances are safe to use, the cluster runs the same workload with ~60% fewer reserved resources.
+
+## Reproducibility
+
+Every command executed during this project is recorded in the execution logs with full output, explanations, and reasoning. The infrastructure scripts in `infrastructure/` can recreate the entire cluster from scratch. To rebuild:
+
+1. `bash infrastructure/setup-vpc.sh` — creates the VPC and networking
+2. `bash infrastructure/launch-instances.sh <subnet-id> <sg-id>` — provisions 5 EC2 instances
+3. SSH into master and run `install-k3s-master.sh`, then `install-k3s-worker.sh` on each worker
+4. SSH into master and run `install-openfaas.sh` — deploys the serverless platform
+5. `kubectl apply -f functions/redis-deployment.yaml` — deploys Redis
+6. Continue with Phase 1.3+ for function deployment
+
+Total infrastructure cost is approximately $0.58/hr (~$14/day) when all instances are running. Stop instances with `aws ec2 stop-instances` when not actively working to avoid charges.
 
 ## References
 
