@@ -3,7 +3,8 @@
 > **Plan document:** [`GOLGI_REPLICATION_PLAN.md`](GOLGI_REPLICATION_PLAN.md)
 > **Previous phase:** [`execution_log_phase0.md`](execution_log_phase0.md)
 > **Course:** CSL7510 — Cloud Computing
-> **Student:** Anshul Kumar (M25AI2036)
+> **Students:** Anshul Kumar (M25AI2036), Neha Prasad (M25AI2056)
+> **Programme:** M.Tech Artificial Intelligence, IIT Jodhpur
 > **Started:** 2026-04-11
 
 This document tracks the execution of Phase 1 — Benchmark Functions. For Phase 0 (AWS infrastructure, k3s, OpenFaaS), see [`execution_log_phase0.md`](execution_log_phase0.md).

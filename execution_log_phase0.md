@@ -3,7 +3,8 @@
 > **Plan document:** [`GOLGI_REPLICATION_PLAN.md`](GOLGI_REPLICATION_PLAN.md)
 > **Next phase:** [`execution_log_phase1.md`](execution_log_phase1.md)
 > **Course:** CSL7510 — Cloud Computing
-> **Student:** Anshul Kumar (M25AI2036)
+> **Students:** Anshul Kumar (M25AI2036), Neha Prasad (M25AI2056)
+> **Programme:** M.Tech Artificial Intelligence, IIT Jodhpur
 > **Started:** 2026-04-11
 
 This document tracks the execution of Phase 0 — AWS Infrastructure Setup. Every command, output, resource ID, and reasoning is recorded here for reproducibility, debugging, and grading reference.

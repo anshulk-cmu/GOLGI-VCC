@@ -3,7 +3,8 @@
 A replication of **Golgi: Performance-Aware, Resource-Efficient Function Scheduling for Serverless Computing** (ACM SoCC 2023, Best Paper Award) on AWS infrastructure using k3s and OpenFaaS.
 
 **Course:** CSL7510 — Cloud Computing  
-**Student:** Anshul Kumar (M25AI2036)  
+**Students:** Anshul Kumar (M25AI2036), Neha Prasad (M25AI2056)  
+**Programme:** M.Tech Artificial Intelligence, IIT Jodhpur  
 **Paper DOI:** [10.1145/3620678.3624645](https://doi.org/10.1145/3620678.3624645)
 
 ---

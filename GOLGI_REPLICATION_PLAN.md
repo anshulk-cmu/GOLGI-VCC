@@ -1,7 +1,8 @@
 # Golgi Replication: Complete Implementation Plan
 
 > **Course:** CSL7510 — Cloud Computing
-> **Student:** Anshul Kumar (M25AI2036)
+> **Students:** Anshul Kumar (M25AI2036), Neha Prasad (M25AI2056)
+> **Programme:** M.Tech Artificial Intelligence, IIT Jodhpur
 > **Paper:** Golgi: Performance-Aware, Resource-Efficient Function Scheduling for Serverless Computing
 > **Authors:** Suyi Li, Wei Wang (HKUST), Jun Yang, Guangzhen Chen, Daohe Lu (WeBank)
 > **Venue:** ACM SoCC 2023 — Best Paper Award
