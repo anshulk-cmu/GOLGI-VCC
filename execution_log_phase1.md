@@ -15,7 +15,7 @@ This document tracks the execution of Phase 1 — Benchmark Functions. For Phase
 
 - [Phase 1 — Benchmark Functions](#phase-1--benchmark-functions)
   - [Step 1.1: Deploy Redis](#step-11-deploy-redis--completed-2026-04-11)
-  - [Step 1.2: Create OpenFaaS Function YAML](#step-12-create-openfaas-function-yaml--not-started)
+  - [Step 1.2: Create OpenFaaS Function YAML](#step-12-create-openfaas-function-yaml--completed-2026-04-11)
   - [Step 1.3: Build and Deploy Functions](#step-13-build-and-deploy-functions--not-started)
   - [Step 1.4: Baseline Latency Measurement](#step-14-baseline-latency-measurement--not-started)
   - [Phase 1 Checkpoint](#phase-1-checkpoint)
@@ -462,9 +462,356 @@ pod "redis-test" deleted from openfaas-fn namespace
 
 ---
 
-### Step 1.2: Create OpenFaaS Function YAML — NOT STARTED
+### Step 1.2: Create OpenFaaS Function YAML — COMPLETED (2026-04-11)
 
-*(To be completed next)*
+**What we did:** Validated and fixed the OpenFaaS function YAML (`stack.yml`) and all three handler implementations (`image-resize`, `db-query`, `log-filter`) to be compatible with the actual OpenFaaS templates (`python3-http`, `golang-http`). Transferred all function code to the master node, pulled OpenFaaS templates, and validated the full build context with `faas-cli build --shrinkwrap`.
+
+**Why this step matters:**
+The `stack.yml` defines all 6 function deployments (3 Non-OC + 3 OC) with their resource configurations. Each function name, handler path, image name, environment variables, and resource requests/limits must be correct before building. A mistake here would cause build or deployment failures in Step 1.3.
+
+---
+
+#### Issues Found and Fixed
+
+Three compatibility issues were discovered when validating against the actual OpenFaaS templates:
+
+**Issue 1: Wrong Go template name**
+
+The `stack.yml` originally used `lang: go-http` for the `log-filter` and `log-filter-oc` functions. The actual template name (from `faas-cli template store pull golang-http-template`) is `golang-http`, not `go-http`.
+
+```yaml
+# BEFORE (wrong)
+log-filter:
+  lang: go-http
+
+# AFTER (correct)
+log-filter:
+  lang: golang-http
+```
+
+**Why the mismatch?** The plan was written using the commonly-referenced short name `go-http`, but the OpenFaaS template store registers the template as `golang-http`. The `faas-cli build --shrinkwrap` command failed with `template with name 'go-http' does not exist in the repo` until this was fixed.
+
+---
+
+**Issue 2: Python handler signature mismatch**
+
+The `python3-http` template wraps handlers in a Flask WSGI server (`index.py`) that passes two arguments to the handler function:
+
+```python
+# What the template calls:
+event = Event()     # event.body = raw request bytes, event.headers, event.method, etc.
+context = Context() # context.hostname = pod hostname
+response_data = handler.handle(event, context)
+```
+
+Our original handlers used a single-argument signature:
+
+```python
+# BEFORE (wrong — single string argument)
+def handle(req):
+    params = json.loads(req)
+    ...
+    return json.dumps({...})
+
+# AFTER (correct — event/context arguments, dict return)
+def handle(event, context):
+    params = json.loads(event.body)
+    ...
+    return {
+        "statusCode": 200,
+        "body": json.dumps({...}),
+        "headers": {"Content-Type": "application/json"},
+    }
+```
+
+Key differences:
+- `event.body` contains the raw request data as bytes (not a string passed directly)
+- The return value must be a dict with `statusCode`, `body`, and optionally `headers` — not a raw string
+- The template's `format_response()` function in `index.py` parses this dict into a proper Flask response
+
+Both `image-resize/handler.py` and `db-query/handler.py` were updated.
+
+---
+
+**Issue 3: Go handler signature mismatch**
+
+The `golang-http` template uses the OpenFaaS SDK handler signature, not the standard `net/http` handler:
+
+```go
+// BEFORE (wrong — standard net/http handler)
+func Handle(w http.ResponseWriter, r *http.Request) {
+    json.NewEncoder(w).Encode(result)
+}
+
+// AFTER (correct — OpenFaaS SDK handler)
+func Handle(req handler.Request) (handler.Response, error) {
+    body, _ := json.Marshal(result)
+    return handler.Response{
+        Body:       body,
+        StatusCode: http.StatusOK,
+        Header: http.Header{
+            "Content-Type": []string{"application/json"},
+        },
+    }, nil
+}
+```
+
+The `go.mod` was also updated to include the required SDK dependency:
+
+```
+require github.com/openfaas/templates-sdk/go-http v0.0.0-20220408082716-5981c545cb03
+```
+
+**Why the SDK signature?** The `golang-http` template's `main.go` creates an HTTP server that calls `Handle(req)` with a pre-parsed `handler.Request` struct containing `Body`, `Header`, `Method`, etc. The handler returns a `handler.Response` struct — the template converts this into the actual HTTP response. This abstraction lets OpenFaaS control the HTTP server lifecycle (graceful shutdown, health checks, timeouts) without exposing raw `http.ResponseWriter`.
+
+---
+
+#### Prerequisites Installed on Master
+
+Before validating the stack, two dependencies had to be installed:
+
+1. **Git** — needed by `faas-cli template store pull` (it clones template repos from GitHub):
+   ```bash
+   sudo dnf install -y git   # git-2.50.1-1.amzn2023.0.1
+   ```
+
+2. **OpenFaaS Templates** — pulled into `~/golgi-vcc/template/`:
+   ```bash
+   cd ~/golgi-vcc
+   faas-cli template store pull python3-http
+   # Wrote 5 templates: python27-flask, python3-flask, python3-flask-debian, python3-http, python3-http-debian
+   faas-cli template store pull golang-http
+   # Wrote 3 templates: golang-http, golang-middleware, golang-middleware-inproc
+   ```
+
+**What templates contain:**
+Each template directory has a `Dockerfile`, `template.yml` (metadata), and a `function/` skeleton. When `faas-cli build` runs, it:
+1. Copies the template's `Dockerfile` and supporting files to a build context
+2. Copies your handler code into the `function/` directory within the build context
+3. Runs `docker build` on the resulting context
+
+The templates handle all the boilerplate: watchdog process (HTTP forking), health checks, graceful shutdown, and the WSGI/HTTP server setup.
+
+---
+
+#### Transferring Function Code to Master
+
+All function source code was transferred from the local Windows machine to `~/golgi-vcc/` on the master node:
+
+```bash
+scp -r functions/image-resize functions/db-query functions/log-filter \
+  functions/stack.yml functions/redis-deployment.yaml \
+  ec2-user@44.212.35.8:~/golgi-vcc/functions/
+```
+
+**Directory structure on master:**
+```
+~/golgi-vcc/
+├── functions/
+│   ├── stack.yml                    # OpenFaaS deployment config (6 functions)
+│   ├── redis-deployment.yaml        # Redis manifest (already applied in Step 1.1)
+│   ├── image-resize/
+│   │   ├── handler.py               # CPU-bound: PIL image resize
+│   │   └── requirements.txt         # Pillow==10.2.0
+│   ├── db-query/
+│   │   ├── handler.py               # I/O-bound: Redis read/write
+│   │   └── requirements.txt         # redis==5.0.1
+│   └── log-filter/
+│       ├── handler.go               # Mixed: regex filtering + IP anonymization
+│       └── go.mod                   # handler/function module with templates-sdk
+└── template/                        # Pulled by faas-cli template store
+    ├── python3-http/                # Flask-based HTTP template for Python
+    ├── golang-http/                 # SDK-based HTTP template for Go
+    └── ... (6 other templates)
+```
+
+---
+
+#### Validation: faas-cli Shrinkwrap
+
+The `faas-cli build --shrinkwrap` command creates the full Docker build context for each function without actually building images. This validates:
+- The stack.yml parses correctly
+- All handler paths resolve to existing directories
+- The referenced templates exist
+- Handler code is copied into the build context correctly
+
+```bash
+cd ~/golgi-vcc && faas-cli build --shrinkwrap -f functions/stack.yml
+```
+
+**Output:**
+```
+[0] > Building log-filter-oc.
+log-filter-oc shrink-wrapped to build/log-filter-oc
+[0] < Building log-filter-oc done in 0.00s.
+[0] > Building image-resize.
+image-resize shrink-wrapped to build/image-resize
+[0] < Building image-resize done in 0.00s.
+[0] > Building image-resize-oc.
+image-resize-oc shrink-wrapped to build/image-resize-oc
+[0] < Building image-resize-oc done in 0.00s.
+[0] > Building db-query.
+db-query shrink-wrapped to build/db-query
+[0] < Building db-query done in 0.00s.
+[0] > Building db-query-oc.
+db-query-oc shrink-wrapped to build/db-query-oc
+[0] < Building db-query-oc done in 0.00s.
+[0] > Building log-filter.
+log-filter shrink-wrapped to build/log-filter
+[0] < Building log-filter done in 0.00s.
+
+Total build time: 0.01s
+```
+
+All 6 functions (3 Non-OC + 3 OC) shrink-wrapped successfully. The build contexts at `~/golgi-vcc/build/` contain:
+- The correct Dockerfile from the template
+- Our handler code in the `function/` subdirectory
+- The `requirements.txt` or `go.mod` for dependencies
+
+**Verified build contexts:**
+- `build/image-resize/function/handler.py` — correct `handle(event, context)` signature with PIL import
+- `build/db-query/function/handler.py` — correct `handle(event, context)` signature with redis import
+- `build/log-filter/function/handler.go` — correct `Handle(req handler.Request)` signature with SDK import
+- `build/log-filter/function/go.mod` — includes `templates-sdk/go-http` dependency
+
+---
+
+#### Final stack.yml (Validated)
+
+```yaml
+version: 1.0
+provider:
+  name: openfaas
+  gateway: http://127.0.0.1:31112
+
+functions:
+  image-resize:
+    lang: python3-http
+    handler: ./functions/image-resize
+    image: golgi/image-resize:latest
+    environment:
+      write_timeout: 60s
+      read_timeout: 60s
+      exec_timeout: 60s
+      max_inflight: 4
+    requests:
+      memory: 512Mi
+      cpu: "1000m"
+    limits:
+      memory: 512Mi
+      cpu: "1000m"
+
+  image-resize-oc:
+    lang: python3-http
+    handler: ./functions/image-resize
+    image: golgi/image-resize:latest
+    environment:
+      write_timeout: 60s
+      read_timeout: 60s
+      exec_timeout: 60s
+      max_inflight: 4
+    requests:
+      memory: 210Mi
+      cpu: "405m"
+    limits:
+      memory: 210Mi
+      cpu: "405m"
+
+  db-query:
+    lang: python3-http
+    handler: ./functions/db-query
+    image: golgi/db-query:latest
+    environment:
+      REDIS_HOST: redis.openfaas-fn.svc.cluster.local
+      max_inflight: 4
+    requests:
+      memory: 256Mi
+      cpu: "500m"
+    limits:
+      memory: 256Mi
+      cpu: "500m"
+
+  db-query-oc:
+    lang: python3-http
+    handler: ./functions/db-query
+    image: golgi/db-query:latest
+    environment:
+      REDIS_HOST: redis.openfaas-fn.svc.cluster.local
+      max_inflight: 4
+    requests:
+      memory: 105Mi
+      cpu: "185m"
+    limits:
+      memory: 105Mi
+      cpu: "185m"
+
+  log-filter:
+    lang: golang-http
+    handler: ./functions/log-filter
+    image: golgi/log-filter:latest
+    environment:
+      max_inflight: 4
+    requests:
+      memory: 256Mi
+      cpu: "500m"
+    limits:
+      memory: 256Mi
+      cpu: "500m"
+
+  log-filter-oc:
+    lang: golang-http
+    handler: ./functions/log-filter
+    image: golgi/log-filter:latest
+    environment:
+      max_inflight: 4
+    requests:
+      memory: 98Mi
+      cpu: "206m"
+    limits:
+      memory: 98Mi
+      cpu: "206m"
+```
+
+**Resource configuration summary (from the plan):**
+
+| Function | Type | Memory (req=limit) | CPU (req=limit) | OC Formula |
+|---|---|---|---|---|
+| image-resize | Non-OC | 512 Mi | 1000m | — |
+| image-resize-oc | OC | 210 Mi | 405m | 0.3×512+0.7×80=210, 0.3×1000+0.7×150=405 |
+| db-query | Non-OC | 256 Mi | 500m | — |
+| db-query-oc | OC | 105 Mi | 185m | 0.3×256+0.7×40=105, 0.3×500+0.7×50=185 |
+| log-filter | Non-OC | 256 Mi | 500m | — |
+| log-filter-oc | OC | 98 Mi | 206m | 0.3×256+0.7×30=98, 0.3×500+0.7×80=206 |
+
+**Why requests = limits?** Setting `requests` equal to `limits` creates "Guaranteed" QoS class pods. This is deliberate: we want deterministic resource allocation so that the OC vs Non-OC performance difference is attributable to the resource limits, not to Kubernetes' burstable scheduling behavior. If `requests < limits`, a pod could burst above its request during idle periods, which would muddy the overcommitment comparison.
+
+---
+
+#### Step 1.2 Summary
+
+| Check | Result | Details |
+|---|---|---|
+| stack.yml syntax valid | PASS | faas-cli parsed all 6 function definitions |
+| Template names correct | PASS (after fix) | `go-http` → `golang-http` |
+| Python handler signature | PASS (after fix) | `handle(event, context)` with dict return |
+| Go handler signature | PASS (after fix) | `Handle(req handler.Request) (handler.Response, error)` |
+| Handler paths resolve | PASS | `./functions/{image-resize,db-query,log-filter}` all exist |
+| Templates pulled | PASS | `python3-http` and `golang-http` in `~/golgi-vcc/template/` |
+| Shrinkwrap validation | PASS | All 6 build contexts generated in `~/golgi-vcc/build/` |
+| Code transferred to master | PASS | All files at `~/golgi-vcc/functions/` on `golgi-master` |
+| Resource configs match plan | PASS | OC allocations follow `0.3×claimed + 0.7×actual` |
+| Git installed on master | PASS | git-2.50.1 installed (needed for template pulls) |
+
+**Prerequisite for Step 1.3:** Docker is NOT installed on the master node. Step 1.3 will need to install Docker before `faas-cli build` can execute (shrinkwrap works without Docker, but actual image building requires it).
+
+**Files modified in this step:**
+- [`functions/stack.yml`](functions/stack.yml) — fixed `go-http` → `golang-http`
+- [`functions/image-resize/handler.py`](functions/image-resize/handler.py) — adapted to `python3-http` template signature
+- [`functions/db-query/handler.py`](functions/db-query/handler.py) — adapted to `python3-http` template signature
+- [`functions/log-filter/handler.go`](functions/log-filter/handler.go) — adapted to `golang-http` template SDK signature
+- [`functions/log-filter/go.mod`](functions/log-filter/go.mod) — added `templates-sdk/go-http` dependency
+
+**Step 1.2 is complete.** The stack.yml and all handler code are validated and ready for Docker build in Step 1.3.
 
 ---
 
@@ -484,10 +831,16 @@ pod "redis-test" deleted from openfaas-fn namespace
 
 ```
 [x] Redis service running and accessible from within the cluster (PONG confirmed)
+[x] stack.yml validated with correct template names (python3-http, golang-http)
+[x] Handler signatures fixed for OpenFaaS templates (python3-http: event/context, golang-http: SDK)
+[x] All function code transferred to master node (~/golgi-vcc/functions/)
+[x] OpenFaaS templates pulled on master (python3-http, golang-http)
+[x] faas-cli shrinkwrap validation passed for all 6 functions
+[x] Resource configurations match the overcommitment formula
+[ ] Docker installed on master (prerequisite for Step 1.3)
 [ ] 3 Non-OC functions deployed and responding
 [ ] 3 OC functions deployed and responding
 [ ] Redis accessible from db-query functions
 [ ] Baseline P95 latency measured for each function (SLO thresholds)
-[ ] Resource configurations match the overcommitment formula
 [ ] All functions handle concurrent requests (max_inflight = 4)
 ```

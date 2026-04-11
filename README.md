@@ -153,10 +153,9 @@ The system operates as a closed feedback loop across four stages:
 │   └── log-filter/                  #   Mixed: regex parsing + IP anonymization (Go)
 │       ├── handler.go
 │       └── go.mod
-├── collector/                       # Metric collection DaemonSet (Phase 2)
-├── ml/                              # ML classifier module (Phase 3)
-├── router/                          # Golgi routing logic (Phase 4)
-└── loadgen/                         # Locust load generation scripts (Phase 6)
+│
+└── (Future phases will add: metric-collector/, ml-module/, router/,
+     vertical-scaler/, load-generator/, monitoring/, analysis/, results/)
 ```
 
 ## Progress
@@ -168,8 +167,8 @@ The system operates as a closed feedback loop across four stages:
 - [x] Phase 0: OpenFaaS deployed via Helm (gateway, prometheus, NATS, queue-worker)
 - [x] Phase 0: Python + dependencies installed on all nodes, cgroup v2 verified
 - [x] Phase 1.1: Redis deployed to openfaas-fn namespace (PING verified)
-- [x] Phase 1.2: Function code written (image-resize, db-query, log-filter)
-- [ ] Phase 1.3: Build and deploy 6 function variants to OpenFaaS
+- [x] Phase 1.2: OpenFaaS function YAML validated, handler signatures fixed for templates, code transferred to master, shrinkwrap verified
+- [ ] Phase 1.3: Build and deploy 6 function variants to OpenFaaS (Docker install needed first)
 - [ ] Phase 1.4: Baseline P95 latency measurement (SLO thresholds)
 - [ ] Phase 2: Metric collector (cgroup v2 DaemonSet)
 - [ ] Phase 3: ML module (Random Forest classifier)
@@ -212,7 +211,9 @@ Every command executed during this project is recorded in the execution logs wit
 3. SSH into master and run `install-k3s-master.sh`, then `install-k3s-worker.sh` on each worker
 4. SSH into master and run `install-openfaas.sh` — deploys the serverless platform
 5. `kubectl apply -f functions/redis-deployment.yaml` — deploys Redis
-6. Continue with Phase 1.3+ for function deployment
+6. Install git on master: `sudo dnf install -y git`
+7. Pull OpenFaaS templates: `faas-cli template store pull python3-http && faas-cli template store pull golang-http`
+8. Continue with Phase 1.3+ for function build and deployment
 
 Total infrastructure cost is approximately $0.58/hr (~$14/day) when all instances are running. Stop instances with `aws ec2 stop-instances` when not actively working to avoid charges.
 

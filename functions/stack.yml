@@ -65,7 +65,7 @@ functions:
       cpu: "185m"
 
   log-filter:
-    lang: go-http
+    lang: golang-http
     handler: ./functions/log-filter
     image: golgi/log-filter:latest
     environment:
@@ -78,7 +78,7 @@ functions:
       cpu: "500m"
 
   log-filter-oc:
-    lang: go-http
+    lang: golang-http
     handler: ./functions/log-filter
     image: golgi/log-filter:latest
     environment:

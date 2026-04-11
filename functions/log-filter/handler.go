@@ -8,13 +8,15 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	handler "github.com/openfaas/templates-sdk/go-http"
 )
 
 var ipPattern = regexp.MustCompile(`\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}`)
 var levelPattern = regexp.MustCompile(`ERROR|WARN|CRITICAL`)
 
 // Handle processes log lines: generates synthetic logs, filters by severity, anonymizes IPs.
-func Handle(w http.ResponseWriter, r *http.Request) {
+func Handle(req handler.Request) (handler.Response, error) {
 	// Generate synthetic log data (1000 lines)
 	logLines := generateLogLines(1000)
 
@@ -38,8 +40,15 @@ func Handle(w http.ResponseWriter, r *http.Request) {
 		"sample":         filtered[:sampleSize],
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+	body, _ := json.Marshal(result)
+
+	return handler.Response{
+		Body:       body,
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Type": []string{"application/json"},
+		},
+	}, nil
 }
 
 func generateLogLines(count int) []string {

@@ -4,9 +4,9 @@ import time
 from PIL import Image
 
 
-def handle(req):
+def handle(event, context):
     """CPU-bound function: generates and resizes a random image using Lanczos resampling."""
-    params = json.loads(req)
+    params = json.loads(event.body)
     width = params.get("width", 1920)
     height = params.get("height", 1080)
 
@@ -26,8 +26,12 @@ def handle(req):
     target_height = height // 2
     resized = img.resize((target_width, target_height), Image.LANCZOS)
 
-    return json.dumps({
-        "original": f"{width}x{height}",
-        "resized": f"{target_width}x{target_height}",
-        "timestamp": time.time(),
-    })
+    return {
+        "statusCode": 200,
+        "body": json.dumps({
+            "original": f"{width}x{height}",
+            "resized": f"{target_width}x{target_height}",
+            "timestamp": time.time(),
+        }),
+        "headers": {"Content-Type": "application/json"},
+    }

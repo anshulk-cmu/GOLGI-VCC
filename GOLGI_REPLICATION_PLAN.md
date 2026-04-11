@@ -787,6 +787,16 @@ as "actual usage" to be conservative.
 
 ### 6.3 Function Implementation
 
+> **Template Signature Note:** The pseudocode below shows simplified handler signatures for
+> readability. The actual OpenFaaS templates require specific signatures:
+> - **python3-http:** `def handle(event, context)` where `event.body` has the request data,
+>   returning `{"statusCode": 200, "body": "...", "headers": {...}}`
+> - **golang-http:** `func Handle(req handler.Request) (handler.Response, error)` using the
+>   `github.com/openfaas/templates-sdk/go-http` SDK package
+>
+> See [`execution_log_phase1.md`](execution_log_phase1.md) Step 1.2 for the exact handler code
+> and the rationale behind each template's signature design.
+
 #### F1: image-resize (Python)
 
 **Directory structure:**
@@ -794,7 +804,6 @@ as "actual usage" to be conservative.
 functions/image-resize/
   handler.py
   requirements.txt
-  Dockerfile
 ```
 
 **handler.py logic:**
@@ -1040,7 +1049,7 @@ functions:
       cpu: "185m"
 
   log-filter:
-    lang: go-http
+    lang: golang-http
     handler: ./functions/log-filter
     image: golgi/log-filter:latest
     environment:
@@ -1053,7 +1062,7 @@ functions:
       cpu: "500m"
 
   log-filter-oc:
-    lang: go-http
+    lang: golang-http
     handler: ./functions/log-filter
     image: golgi/log-filter:latest
     environment:

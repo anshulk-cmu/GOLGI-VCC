@@ -7,9 +7,9 @@ import redis
 REDIS_HOST = os.environ.get("REDIS_HOST", "redis.openfaas-fn.svc.cluster.local")
 
 
-def handle(req):
+def handle(event, context):
     """I/O-bound function: performs Redis read/write operations."""
-    params = json.loads(req)
+    params = json.loads(event.body)
     key = params.get("key", "default_key")
 
     # Connect to Redis (network operation)
@@ -27,4 +27,8 @@ def handle(req):
     # Read back the result
     result = r.get(f"result:{key}")
 
-    return result.decode()
+    return {
+        "statusCode": 200,
+        "body": result.decode(),
+        "headers": {"Content-Type": "application/json"},
+    }
