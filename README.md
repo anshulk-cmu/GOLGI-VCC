@@ -168,6 +168,7 @@ The system operates as a closed feedback loop across four stages:
 - [x] Phase 0: Python + dependencies installed on all nodes, cgroup v2 verified
 - [x] Phase 1.1: Redis deployed to openfaas-fn namespace (PING verified)
 - [x] Phase 1.2: OpenFaaS function YAML validated, handler signatures fixed for templates, code transferred to master, shrinkwrap verified
+- [x] Report: Sections 1-3 written (Introduction, Background, System Design)
 - [ ] Phase 1.3: Build and deploy 6 function variants to OpenFaaS (Docker install needed first)
 - [ ] Phase 1.4: Baseline P95 latency measurement (SLO thresholds)
 - [ ] Phase 2: Metric collector (cgroup v2 DaemonSet)
@@ -178,7 +179,7 @@ The system operates as a closed feedback loop across four stages:
 - [ ] Phase 7: End-to-end integration
 - [ ] Phase 8: Evaluation and metrics collection
 - [ ] Phase 9: Results analysis and visualization
-- [ ] Phase 10: Report writing and demo
+- [ ] Report: Sections 4-8 (Implementation through Conclusion, pending experiment data)
 
 ## Benchmark Functions
 

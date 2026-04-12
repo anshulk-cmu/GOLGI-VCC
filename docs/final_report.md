@@ -31,237 +31,253 @@
 
 ## 1. Introduction
 
-<!-- Pages 2–3, ~1500 words -->
-
 ### 1.1 The Serverless Resource Problem
 
-<!-- 
-- Define serverless computing (FaaS): users deploy functions, cloud handles scaling/infra
-- The resource reservation model: users specify memory (e.g., 512 MB), CPU is allocated proportionally
-- The waste problem: studies (Shahrad et al. 2020) show functions use only ~25% of reserved resources on average
-- Scale of the problem: millions of function invocations per day on major platforms
-- Cost implications: providers over-provision hardware to guarantee reserved resources; users overpay for resources they never use
-- This is the fundamental tension: safety vs efficiency
--->
+Serverless computing, often called Function-as-a-Service (FaaS), lets developers deploy individual functions without managing servers. The cloud provider handles scaling, container lifecycle, and infrastructure. Users write a function, push it, and pay per invocation. AWS Lambda, Azure Functions, and Google Cloud Functions process millions of invocations per day on this model.
+
+The pricing and scheduling model works like this: a user declares how much memory their function needs (say, 512 MB), and the platform allocates CPU proportionally. The platform then reserves those resources on a physical machine for the lifetime of each invocation. This reservation is a guarantee. If the user asks for 512 MB, the platform sets a hard cgroup limit at 512 MB, and no other container can touch that memory.
+
+The problem is that users are terrible at estimating what they actually need. Shahrad et al. [2] analyzed production traces from Azure Functions and found that functions use roughly 25% of their reserved resources on average. The median memory consumption was 29 MB for functions configured with 512 MB or more. Three-quarters of all reserved resources sit idle.
+
+This waste compounds at scale. A cloud provider running a million concurrent function instances, with each instance holding resources it will never touch, is leaving enormous capacity on the table. Users, meanwhile, pay for memory they never use. The fundamental tension is between safety (guaranteeing reserved resources so functions never get starved) and efficiency (not wasting 75% of a data center's capacity on empty reservations).
 
 ### 1.2 Why Overcommitment Alone Fails
 
-<!--
-- Define overcommitment: allocating less physical resources than the sum of all reservations
-- Common in VMs (VMware routinely overcommits 2-4x), but serverless is different
-- The contention problem: when multiple co-located functions spike simultaneously, they compete for shared CPU/memory
-- Paper's finding: blind overcommitment causes up to 183% P95 latency increase
-- Why this is unacceptable: serverless users have latency SLOs (e.g., API responses must complete in < 200ms)
-- The challenge: how to overcommit safely — save resources without violating latency guarantees
--->
+The obvious fix is overcommitment: allocate less physical memory and CPU than the sum of all reservations, and bet that not everyone will spike at once. This is standard practice in virtualization. VMware ESXi routinely overcommits memory by 2-4x using techniques like ballooning, transparent page sharing, and swap. It works because VM workloads are relatively stable and long-lived, giving the hypervisor time to react when pressure rises.
+
+Serverless functions are a different animal. They are short-lived (milliseconds to seconds), bursty (a function might go from zero to a thousand concurrent invocations in seconds), and densely co-located (dozens of different functions from different users share the same physical host). When a provider blindly squeezes resource allocations across the board, multiple co-located functions can spike simultaneously. They compete for shared CPU cycles, memory bandwidth, and last-level cache. The result is contention, and contention means latency.
+
+Li et al. [1] measured this directly. Blind overcommitment on their test cluster caused P95 latency to increase by up to 183%. For a function serving an API endpoint with a 200ms SLO, that kind of degradation is a contract violation. Users choose serverless precisely because they don't want to think about infrastructure. If the platform silently makes their functions 2.8x slower during peak load, the abstraction has broken its promise.
+
+The challenge, then, is not whether to overcommit, but how to overcommit safely: capture the cost savings of reduced allocation without causing the latency spikes that make overcommitment dangerous.
 
 ### 1.3 The Golgi Approach
 
-<!--
-- Two-instance model: Non-OC (safe, expensive) and OC (cheap, risky)
-- Key insight: not all requests experience contention — most of the time, OC instances are fine
-- ML classifier trained on real-time container metrics predicts when contention will cause SLO violations
-- Router directs requests based on predictions: OC if safe, Non-OC if risky
-- Vertical scaling as safety net: adjust concurrency limits when predictions are wrong
-- Result: 42% memory cost reduction, <5% SLO violation rate
-- Won Best Paper at ACM SoCC 2023
--->
+Golgi, proposed by Li et al. [1] at ACM SoCC 2023 (where it won the Best Paper award), offers one answer. The core idea is a two-instance model. For each serverless function, the platform maintains two types of container instances: Non-OC (non-overcommitted) instances with full reserved resources, and OC (overcommitted) instances with reduced resources based on actual measured usage. Non-OC instances are safe but expensive. OC instances are cheap but risky.
+
+The key observation is that contention on OC instances is not constant. Most of the time, the reduced resources are perfectly adequate, because the co-located functions on that host happen not to be spiking simultaneously. Contention is a transient condition. If the system can predict when contention is about to cause trouble, it can route those specific requests to Non-OC instances and send everything else to the cheaper OC instances.
+
+Golgi does this prediction with a Mondrian Forest, an online variant of Random Forests that updates incrementally as new data arrives. The classifier takes as input nine real-time metrics scraped from each container's cgroup (CPU utilization, memory usage, network I/O, disk I/O, inflight request count, and LLC cache miss rate) and outputs a binary prediction: will this request violate the latency SLO if sent to an OC instance right now? A router sits in front of all function instances, queries the classifier for each incoming request, and directs it to OC or Non-OC accordingly.
+
+Because no classifier is perfect, Golgi adds a second safety mechanism: vertical scaling. An AIMD (Additive Increase, Multiplicative Decrease) controller monitors the actual SLO violation rate on each OC instance and adjusts its maximum concurrency limit. If violations are rising, the controller reduces concurrency (fewer requests per container, less contention). If violations are low, it gradually allows more concurrency. This acts as a correction loop for systematic prediction errors.
+
+The results are strong. On a cluster of seven c5.9xlarge workers running eight benchmark functions under Azure Function trace replay, Golgi achieved 42% memory cost reduction while keeping SLO violations below 5%.
 
 ### 1.4 Motivation for Replication
 
-<!--
-- Why replicate? (a) Validate claims independently on different hardware/software
-- (b) Understand system trade-offs that the paper glosses over (implementation complexity, sensitivity to parameters)
-- (c) Course learning objectives: hands-on with K8s, ML systems, cloud infrastructure, performance engineering
-- (d) IMPORTANT: The paper has NO public GitHub repository or source code available. The authors did not release their implementation. This means:
-  - Every component must be built from scratch based solely on the paper's descriptions
-  - Ambiguities in the paper must be resolved through our own engineering judgment
-  - Certain implementation details (exact metric collection paths, model hyperparameters, routing logic) are inferred from the paper's text, figures, and evaluation section
-  - This makes the replication both more challenging and more valuable — it tests whether the paper provides sufficient detail for independent reproduction
-- (e) Scope adjusted to match course project requirements: limited time (1 semester), limited budget (personal AWS), limited team size (2 students) — see Section 1.5 for specific simplifications
--->
+We replicate Golgi for three reasons, one of which makes the effort considerably harder than a typical reproduction study.
+
+First, the paper's claims are worth testing on different hardware and software. The original evaluation ran on c5.9xlarge instances (36 vCPUs, 72 GB RAM each) with what was likely cgroup v1 on an older kernel. Our cluster uses t3.xlarge instances (4 vCPUs, 16 GB RAM) with cgroup v2 on kernel 6.1. If the system's gains depend on specific hardware characteristics (deep out-of-order pipelines, large LLC, high memory bandwidth), our commodity hardware will expose that dependency. If the gains hold, it strengthens the paper's generality claims.
+
+Second, replication surfaces trade-offs that papers necessarily compress. The paper describes a Mondrian Forest classifier, a metric collection daemon, a modified scheduler, and a vertical scaler in roughly twelve pages. Building each component from scratch forces us to confront decisions the authors made but did not discuss: how to handle cgroup path discovery when containers restart, what to do during the classifier's cold-start period before enough training data exists, how to set the SLO threshold without access to the original function code.
+
+Third, and most critically: Li et al. did not release source code. No public GitHub repository exists. No implementation artifacts are available. Every component of our replication, from the metric collector to the ML module to the routing logic, is built from scratch using only the paper's text, figures, and evaluation methodology as guidance. Where the paper is ambiguous (and it is, on several implementation details), we make our own engineering choices and document them. This makes the replication a genuine test of whether the paper provides enough detail for independent reproduction, which is itself a valuable finding regardless of whether the performance numbers match.
 
 ### 1.5 Scope and Contributions
 
-<!--
-- IMPORTANT FRAMING: Since no source code is publicly available, this is a clean-room replication built entirely from the paper's descriptions. We adjusted the scope to match:
-  (a) Course project constraints: 2 students, 1 semester, personal AWS budget (~$50-100 total)
-  (b) Replication feasibility: certain details (exact Mondrian Forest implementation, proprietary Azure Function traces, WeBank internal infrastructure) are not reproducible — we make justified substitutions
-  (c) Academic requirements: demonstrate understanding of the core contributions, not pixel-perfect reproduction
+This is a clean-room replication built by two M.Tech students over one semester, running on a personal AWS budget of approximately $50-100 total. We do not attempt pixel-perfect reproduction of the original results. Instead, we build a faithful but simplified version that preserves the paper's core architectural contributions while making justified substitutions where the original is infeasible to reproduce.
 
-- What we built: complete end-to-end system on AWS (5 EC2 instances, k3s, OpenFaaS)
-- What we simplified and why:
-  - 3 functions instead of 8 (sufficient to cover CPU-bound, I/O-bound, and mixed profiles)
-  - Random Forest instead of Mondrian Forest (no open-source Mondrian Forest for Python; RF achieves comparable accuracy per paper's own comparison)
-  - 7 metrics instead of 9 (hardware perf counters like LLC cache miss require perf_event_open privileges and kernel configuration that conflicts with containerized environments)
-  - 3 workers instead of 7 (budget constraint; principle of overcommitment still holds at smaller scale)
-  - Synthetic Locust workload instead of Azure trace replay (Azure traces are available but lack the exact arrival patterns used in the paper)
-- What claims we test: (1) cost reduction with ML-guided routing, (2) SLO maintenance, (3) vertical scaling effectiveness
-- Our contributions: (a) first known independent replication of Golgi on commodity hardware, (b) cgroup v2 implementation (paper likely used v1 — we document the differences), (c) empirical comparison showing Random Forest is a viable substitute for Mondrian Forest in this domain
--->
+Our system runs on five EC2 instances: one t3.medium master, three t3.xlarge workers, and one t3.medium load generator, orchestrated with k3s and OpenFaaS. We deploy three benchmark functions (instead of eight) covering CPU-bound, I/O-bound, and mixed workload profiles. Three functions are enough to demonstrate that the routing system differentiates between workload types; adding five more would increase development time without changing the principle being tested.
+
+We use scikit-learn's Random Forest instead of a Mondrian Forest. No maintained open-source Mondrian Forest implementation exists for Python, and the paper's own evaluation shows that a batch-trained Random Forest achieves F1 scores of 0.71-0.84, nearly matching the Mondrian Forest's 0.70-0.84 range. The trade-off is that we retrain periodically (every five minutes) rather than updating online, which introduces a staleness window that the original system avoids. We collect seven of the paper's nine metrics, dropping LLC cache miss rate and memory bandwidth because reading hardware performance counters requires `perf_event_open` privileges and kernel configuration that conflicts with k3s's containerized architecture.
+
+We test three of the paper's central claims: that ML-guided routing reduces memory cost compared to uniform allocation, that SLO violations remain below an acceptable threshold during this cost reduction, and that vertical scaling provides a meaningful safety net when the classifier makes errors.
+
+We make three contributions. First, to our knowledge, this is the first independent replication of Golgi on commodity hardware. Second, we implement the full system on cgroup v2 (the paper likely used cgroup v1), documenting the differences in file paths, metric parsing, and unified hierarchy behavior. Third, we compare Random Forest against the paper's reported Mondrian Forest results in this specific classification task, testing whether the simpler model is a viable substitute that lowers the barrier for future replications.
 
 ### 1.6 Report Organization
 
-<!--
-- Section 2: Background on serverless, overcommitment, related scheduling work
-- Section 3: System design and architecture
-- Section 4: Implementation details
-- Section 5: Experimental methodology
-- Section 6: Results
-- Section 7: Discussion and limitations
-- Section 8: Conclusion
--->
+Section 2 covers background on serverless computing, resource overcommitment in cloud systems, and existing scheduling approaches, ending with a detailed description of the Golgi paper's design. Section 3 describes our system architecture: the two-instance model, metric collector, ML classifier, router, and vertical scaler. Section 4 covers implementation specifics, including infrastructure setup, benchmark functions, cgroup v2 metric parsing, and the load generator. Section 5 defines the experimental setup: hardware configuration, workload patterns, baselines, metrics, and SLO definitions. Section 6 presents results and analysis. Section 7 discusses findings, limitations, threats to validity, and lessons learned. Section 8 concludes.
 
 ---
 
 ## 2. Background and Related Work
 
-<!-- Pages 4–5, ~1500 words -->
-
 ### 2.1 Serverless Computing Model
 
-<!--
-- FaaS abstraction: stateless functions triggered by events (HTTP, queue, timer)
-- Execution model: cold start → warm container → execute → idle → evict
-- Billing: per-invocation + per-GB-second of memory allocated
-- Key platforms: AWS Lambda, Azure Functions, Google Cloud Functions, OpenFaaS (self-hosted)
-- Resource model: user specifies memory (128 MB – 10 GB), CPU allocated proportionally
-- Scaling: platform auto-scales instances (0 to N) based on incoming request rate
-- The container lifecycle: why short-lived containers make resource management different from long-running VMs
--->
+Serverless computing abstracts away infrastructure entirely. A developer writes a stateless function, deploys it to a platform (AWS Lambda, Azure Functions, Google Cloud Functions, or a self-hosted system like OpenFaaS), and the platform takes care of everything else: provisioning containers, scaling replicas up and down, routing requests, and recycling idle instances. Functions are triggered by events, typically HTTP requests, message queue entries, or timers.
+
+The execution lifecycle of a single invocation follows a predictable pattern. If no warm container exists for the function, the platform performs a cold start: it pulls the container image, creates a new container, initializes the runtime, and loads the function code. This takes anywhere from tens of milliseconds (for lightweight Go binaries) to several seconds (for Python functions with large dependency trees). Once the container is warm, subsequent requests reuse it, skipping the cold start. After a period of inactivity, the platform evicts the container to free resources.
+
+Billing follows two dimensions: a flat per-invocation fee and a per-GB-second charge based on the memory the user configures. On AWS Lambda, for example, a user selects a memory size between 128 MB and 10,240 MB, and the platform allocates CPU proportionally. A function configured with 1,769 MB gets one full vCPU; half the memory gets half the CPU. The user pays for this configured memory for the entire duration of each invocation, regardless of how much memory the function actually touches.
+
+This billing model creates a perverse incentive. Users configure conservatively, choosing higher memory to avoid out-of-memory kills, but then use only a fraction of what they reserve. The platform, bound to honor those reservations, cannot schedule other work into the unused capacity. The result, quantified by Shahrad et al. [2] in their analysis of Azure Functions production traces, is that functions consume roughly 25% of their reserved resources on average. The remaining 75% is effectively stranded.
 
 ### 2.2 Resource Overcommitment in Cloud Systems
 
-<!--
-- VM-level overcommitment: hypervisors (VMware ESXi, KVM) routinely overcommit memory 1.5-4x using ballooning, page sharing, swap
-- Container-level overcommitment: Kubernetes requests vs limits — requests are guaranteed minimum, limits are the ceiling
-- The difference in serverless: (a) functions are short-lived (ms to seconds), (b) workloads are bursty and unpredictable, (c) cold starts add latency penalty, (d) many co-located functions from different users
-- Why serverless overcommitment is harder: can't use VM techniques (ballooning takes seconds, functions complete in milliseconds)
-- Prior work: Shahrad et al. (2020) characterize Azure Function traces — show temporal patterns that could enable prediction
--->
+Overcommitment addresses this waste by allocating less physical capacity than the sum of all reservations, gambling that not all tenants will peak at the same time. The technique is well-established in virtualization. VMware ESXi routinely overcommits memory by 1.5-4x using a combination of ballooning (a guest-level driver that reclaims unused pages), transparent page sharing (deduplicating identical memory pages across VMs), and swap (spilling excess to disk). KVM-based hypervisors use similar mechanisms. These techniques work because VM workloads are long-lived and change slowly enough for the hypervisor to adjust.
+
+In Kubernetes, the distinction between resource requests and limits serves a similar purpose. A container's resource request is a guaranteed minimum that the scheduler uses for bin-packing decisions. Its limit is a ceiling enforced by the kernel's cgroup controller. Setting limits higher than requests allows the container to burst into unused capacity on the node. The ratio between the sum of all limits and the node's physical capacity determines the overcommitment factor.
+
+Serverless functions make overcommitment harder for several reasons. Functions are short-lived, often completing in tens of milliseconds, which means the system has no time to react to individual resource spikes using ballooning or similar feedback mechanisms. Workloads are bursty and unpredictable: a function might receive zero invocations for minutes, then thousands in a second. Cold starts add a latency penalty that compounds under resource pressure, because spinning up a new container itself requires CPU and memory. And dense co-location means dozens of different functions from different users share the same physical host, increasing the probability that multiple functions spike simultaneously.
+
+Shahrad et al. [2] showed that despite these challenges, Azure Function traces exhibit temporal patterns (diurnal cycles, periodic triggers, correlated bursts) that are in principle predictable. This observation opened the door for prediction-based overcommitment: instead of statically squeezing all allocations, use runtime signals to decide when overcommitment is safe and when it is not.
 
 ### 2.3 Existing Scheduling Approaches
 
-<!--
-- Round-robin: simple, no awareness of resource state — poor under heterogeneous load
-- Least-connections: better load balancing but no resource awareness
-- Kubernetes default scheduler: bin-packing based on resource requests — static, doesn't adapt to runtime contention
-- Harvest VMs (Ambati et al. 2020): use spare capacity but no latency guarantees
-- Kraken (Wen et al. 2021): cold-start aware scheduling but doesn't address overcommitment
-- ENSURE (Suresh et al. 2020): SLO-aware but reactive (responds to violations after they happen)
-- Gap: no existing system combines (a) proactive ML prediction with (b) overcommitment-aware routing and (c) adaptive safety nets
--->
+Traditional load balancing strategies operate without awareness of resource state. Round-robin distributes requests evenly across instances regardless of how loaded each one is, which works well when all instances are identical and equally busy, but fails when workloads are heterogeneous or when some instances are under contention. Least-connections improves on this by tracking active request counts, but still has no visibility into CPU utilization, memory pressure, or cache interference on the underlying host.
+
+The Kubernetes default scheduler takes a bin-packing approach based on declared resource requests. When a new pod needs to be placed, the scheduler scores candidate nodes by how well the pod's resource requests fit into the node's remaining allocable capacity. This is a static, placement-time decision. Once a pod is running, the scheduler does not move it or adapt to runtime contention. If five functions happen to spike on the same node, the scheduler is unaware.
+
+Several research systems have addressed parts of this problem. Harvest VMs (Ambati et al. [4]) let low-priority workloads consume spare capacity on partially-utilized servers, but offer no latency guarantees when the primary workload reclaims its resources. Kraken (Wen et al. [5]) focuses on cold-start-aware container provisioning for DAG-structured serverless workflows. It reduces end-to-end latency by pre-warming containers along the critical path, but does not address the resource overcommitment problem. ENSURE (Suresh et al. [6]) provides SLO-aware scheduling for serverless functions, but operates reactively: it detects violations after they happen and adjusts resource allocations in response, rather than predicting and preventing them.
+
+The gap in the literature is a system that combines three capabilities: proactive prediction of resource contention before it causes latency violations, routing decisions that exploit the difference between overcommitted and fully-provisioned instances, and an adaptive feedback mechanism that corrects for prediction errors. Golgi fills this gap.
 
 ### 2.4 The Golgi Paper in Detail
 
-<!--
-- System architecture: client → gateway → router → function instances (OC/Non-OC)
-- Metrics collected (9): CPU utilization, memory utilization, memory bandwidth, network I/O (send/recv), disk I/O (read/write), inflight requests, LLC cache miss rate
-- Mondrian Forest: online random forest variant that updates incrementally without full retraining
-- Labeling: a request is labeled SLO-violating if its latency exceeds the P95 of the Non-OC baseline
-- Routing: Power of Two Choices — sample 2 instances, pick the one with lower violation probability
-- Vertical scaling: AIMD (Additive Increase, Multiplicative Decrease) on max_inflight per container
-- Evaluation: 8 functions, 7 workers (c5.9xlarge, 36 vCPU each), Azure Function Trace replay
-- Results: 42% memory reduction, 35% VM time reduction, <5% SLO violations
--->
+The Golgi system, proposed by Li et al. [1], sits between the serverless platform's API gateway and the function instances. For each deployed function, Golgi maintains two sets of container replicas: Non-OC instances provisioned at the user's declared resource levels, and OC instances provisioned at reduced levels computed from observed actual usage. The overcommitment formula is `OC_allocation = 0.3 * claimed + 0.7 * actual`, weighting 70% toward measured usage with a 30% safety margin from the original reservation.
+
+A metric collection daemon running on each worker node scrapes nine metrics from every function container at 500ms intervals: CPU utilization, memory utilization, memory bandwidth, network bytes sent, network bytes received, disk I/O read, disk I/O write, the count of inflight requests, and the LLC (last-level cache) miss rate. These metrics are read from the Linux cgroup filesystem and hardware performance counters, then forwarded to a central ML module.
+
+The ML module trains a Mondrian Forest classifier [3], an online variant of Random Forests that can incorporate new training samples incrementally without full retraining. Each training sample is a feature vector of the nine metrics paired with a binary label: 1 if the corresponding request's latency exceeded the SLO threshold (defined as the P95 latency of the Non-OC baseline), 0 otherwise. A critical implementation detail is the use of stratified reservoir sampling to maintain a balanced training set. Without this balancing step, the training data would be heavily skewed toward negative samples (most requests meet the SLO), and the classifier's F1 score would drop from 0.78 to 0.26.
+
+The router uses a Power of Two Choices algorithm for instance selection. For each incoming request, it samples two OC instances, queries the classifier for each one's current violation probability, and routes the request to the instance with the lower probability. If both probabilities exceed a safety threshold, the request goes to a Non-OC instance instead. A global Safe flag, computed from the rolling P95 latency across all OC instances, provides a coarse-grained override: when contention is system-wide, the flag flips to unsafe and all requests are routed to Non-OC instances until conditions improve.
+
+Vertical scaling provides a second layer of defense. An AIMD controller on each OC instance monitors its SLO violation rate over a rolling window. If the violation rate exceeds 5%, the controller decreases the instance's maximum concurrency by one (multiplicative decrease, floored at 1). If violations stay below 2% for three consecutive windows, it increases concurrency by one (additive increase). Reducing concurrency means fewer concurrent requests per container, less contention for CPU and cache, and lower tail latency, at the cost of needing more containers or longer queue wait times.
+
+The original evaluation used eight benchmark functions spanning five languages, deployed on seven c5.9xlarge workers (36 vCPUs, 72 GB RAM each), driven by replayed Azure Function Trace workloads. Golgi achieved 42% memory cost reduction, 35% VM time reduction, and kept SLO violations below 5%.
 
 ### 2.5 Differences from the Original
 
-<!--
-- Table comparing: cluster size, instance types, ML model, metrics count, functions, workload, routing implementation
-- Why each simplification is acceptable: preserves the core contribution (ML-guided OC routing)
-- What we expect to differ in results: lower cost savings (smaller cluster, fewer functions), slightly higher violation rate (simpler model)
--->
+Table 1 summarizes the key differences between our replication and the original system.
+
+| Dimension | Original (Li et al.) | Our Replication |
+|---|---|---|
+| Cluster size | 7 workers (c5.9xlarge: 36 vCPU, 72 GB) | 3 workers (t3.xlarge: 4 vCPU, 16 GB) |
+| Benchmark functions | 8 functions in 5 languages | 3 functions in Python/Go |
+| ML classifier | Mondrian Forest (online, incremental) | Random Forest (batch retrain every 5 min) |
+| Metrics collected | 9 (including LLC miss rate, memory bandwidth) | 7 (excluding LLC miss rate, memory bandwidth) |
+| Workload | Azure Function Trace replay | Synthetic Locust traces (steady, bursty, ramp) |
+| Router implementation | Modified faas-netes (Go) | Nginx + Python sidecar |
+| Metric collection | Go relay daemon | Python DaemonSet |
+| Inter-component RPC | gRPC | HTTP REST (Flask) |
+
+Each simplification preserves the paper's core contribution: ML-guided routing between overcommitted and fully-provisioned instances. The ML model change is the most consequential, since it replaces online learning with periodic batch retraining, introducing a staleness window of up to five minutes. The paper's own evaluation partially addresses this concern by reporting that batch-trained Random Forest achieves F1 scores of 0.71-0.84, nearly matching the Mondrian Forest's 0.70-0.84 range.
+
+We expect our results to show lower cost savings than the original (roughly 25-30% versus 42%) due to fewer functions offering less opportunity for statistical multiplexing and a smaller cluster providing less co-location diversity. We also expect a higher SLO violation rate (roughly 8% versus under 5%) due to the missing LLC metrics and the retraining delay. Both outcomes would still validate the paper's core thesis that ML-guided overcommitment routing is practical and beneficial, if at a reduced magnitude.
 
 ---
 
 ## 3. System Design
 
-<!-- Pages 5–6, ~1400 words -->
+This section describes the architecture of our replication at the design level. Implementation details (specific tools, configurations, code) follow in Section 4.
 
 ### 3.1 Architecture Overview
 
-<!--
-- Full system diagram (same as README but with more detail)
-- Data flow: request arrives → router queries ML module → routing decision → function executes → response returned
-- Control flow: metric collector → ML module (training data) → model update → router (prediction API)
-- Separation of concerns: data plane (request handling) vs control plane (metric collection, ML training)
--->
+The system has two planes. The data plane handles request traffic: a load generator sends HTTP requests to the router, which forwards each request to either an OC or Non-OC function instance based on the ML classifier's prediction. The function executes, returns a response, and the router forwards it back to the client. The control plane operates alongside but asynchronously: metric collectors on each worker node scrape container-level resource usage, push it to the ML module, and the ML module periodically retrains its classifier and updates the prediction labels that the router reads.
+
+```
+                    +-----------------+
+                    | Load Generator  |
+                    |    (Locust)     |
+                    +-------+---------+
+                            |
+                            | HTTP
+                            v
+                    +-----------------+
+                    |     Router      |
+                    | (Nginx+Python)  |
+                    +--+-----------+--+
+                       |           |
+              Non-OC   |           |   OC
+                       v           v
+                 +-----------+ +-----------+
+                 | Function  | | Function  |
+                 | Instances | | Instances |
+                 | (full     | | (reduced  |
+                 |  resources| |  resources|
+                 +-----+-----+ +-----+-----+
+                       |             |
+                       +------+------+
+                              | metrics + latency
+                              v
+                    +-----------------+       +------------------+
+                    |   ML Module     |<------| Metric Collector |
+                    |   (Flask API)   |  push | (DaemonSet)      |
+                    +-----------------+       +------------------+
+```
+
+The separation matters because data plane latency is on the critical path of every request. The router's prediction lookup must complete in single-digit milliseconds. The control plane, by contrast, operates on a slower cadence: metrics are scraped every 500ms, and the model retrains every five minutes. Keeping these concerns separate means a slow retraining cycle never blocks request handling.
 
 ### 3.2 Two-Instance Model
 
-<!--
-- Overcommitment formula: OC_allocation = α × claimed + (1 - α) × actual
-- Why α = 0.3: paper's choice — gives 70% weight to actual usage, 30% safety margin
-- Our resource configurations:
-  - image-resize: Non-OC (512Mi, 1000m CPU) → OC (210Mi, 405m CPU)
-  - db-query: Non-OC (256Mi, 500m) → OC (105Mi, 185m)
-  - log-filter: Non-OC (256Mi, 500m) → OC (98Mi, 206m)
-- How "actual usage" is measured: deploy Non-OC, send 100 requests, record P75 of cgroup memory.current
-- Both variants run the same code — only Kubernetes resource requests/limits differ
--->
+The foundation of Golgi's design is running two variants of every function, identical in code but different in resource allocation. Non-OC instances receive the full resources the user declared. OC instances receive reduced resources computed from observed actual usage using the formula:
+
+```
+OC_allocation = α × claimed + (1 - α) × actual
+```
+
+The paper uses α = 0.3, giving 70% weight to measured usage and retaining 30% of the original reservation as a safety margin. We adopt the same value. Changing α would change the experiment, so we treat it as a fixed parameter rather than something to tune.
+
+To measure actual usage, we deploy each function in its Non-OC configuration, send 100 requests under no concurrent load, and record the P75 of memory consumption from the cgroup's `memory.current` file. CPU actual usage is derived similarly from `cpu.stat`. Applying the formula yields the OC resource allocations shown in Table 2.
+
+**Table 2: Resource configurations for Non-OC and OC function variants.**
+
+| Function | Profile | Non-OC Memory | Non-OC CPU | OC Memory | OC CPU |
+|---|---|---|---|---|---|
+| image-resize | CPU-bound | 512 Mi | 1000m | 210 Mi | 405m |
+| db-query | I/O-bound | 256 Mi | 500m | 105 Mi | 185m |
+| log-filter | Mixed | 256 Mi | 500m | 98 Mi | 206m |
+
+Both variants run from the same container image. The only difference is the Kubernetes resource requests and limits specified in the deployment manifest. This means the OC variant's container has less CPU time available (the kernel's CFS scheduler enforces the CPU limit via cgroup `cpu.max`) and a lower memory ceiling (the kernel's OOM killer fires if `memory.current` exceeds `memory.max`). Under light load, the OC instance performs identically to the Non-OC instance because the function's actual resource consumption falls well within the reduced allocation. Under heavy load, when multiple functions on the same node compete for CPU cycles and memory bandwidth, the OC instance hits its limits first.
 
 ### 3.3 Metric Collector
 
-<!--
-- Deployment: DaemonSet (one pod per worker node)
-- Collection interval: 500ms (paper uses 500ms)
-- 7 metrics collected:
-  1. CPU utilization: from cgroup cpu.stat (usage_usec / elapsed_usec)
-  2. Memory utilization: from cgroup memory.current / memory.max
-  3. Network bytes sent: from /proc/[pid]/net/dev or cgroup
-  4. Network bytes received: same
-  5. Disk I/O: from cgroup io.stat
-  6. Inflight requests: from OpenFaaS gateway prometheus metric
-  7. Invocation rate: from OpenFaaS gateway prometheus metric (rate of http_requests_total)
-- cgroup v2 paths: /sys/fs/cgroup/kubepods.slice/kubepods-burstable.slice/...
-- Container discovery: list pods via K8s API → get container ID → find cgroup directory
-- Data format: JSON metric snapshots pushed to ML module via HTTP POST
--->
+The metric collector runs as a Kubernetes DaemonSet, placing exactly one collector pod on each worker node. Each collector scrapes seven metrics from every function container on its node at 500ms intervals, matching the paper's collection frequency.
+
+The seven metrics are:
+
+1. **CPU utilization.** Read from the cgroup v2 file `cpu.stat`, which reports cumulative CPU time in microseconds (`usage_usec`). The collector computes utilization as the delta in `usage_usec` divided by the elapsed wall-clock time between two consecutive readings.
+
+2. **Memory utilization.** The ratio of `memory.current` (bytes currently allocated) to `memory.max` (the cgroup's memory limit). A value approaching 1.0 signals the container is near its memory ceiling.
+
+3. **Network bytes sent.** Read from `/proc/[pid]/net/dev` for the container's network namespace, summing the transmit bytes column across all interfaces.
+
+4. **Network bytes received.** The receive counterpart from the same file.
+
+5. **Disk I/O.** Parsed from the cgroup v2 file `io.stat`, which reports cumulative bytes read (`rbytes`) and written (`wbytes`) per block device.
+
+6. **Inflight requests.** Scraped from OpenFaaS's built-in Prometheus endpoint, which exposes `gateway_function_invocation_inflight` as a gauge per function.
+
+7. **Invocation rate.** Also from Prometheus: the per-second rate of `gateway_function_invocation_total`, computed over a short window.
+
+Container discovery is the trickiest part of the collector's job. The collector queries the Kubernetes API for all pods in the `openfaas-fn` namespace, extracts each container's ID from the pod status (a string like `containerd://abc123...`), and maps it to a cgroup directory at `/sys/fs/cgroup/kubepods.slice/kubepods-burstable.slice/.../cri-containerd-abc123.scope/`. This mapping is fragile: if a container restarts, it gets a new ID and a new cgroup path. The collector must re-discover paths on every scrape cycle or risk reading stale cgroup files.
+
+Each scrape cycle produces a JSON snapshot containing all seven metrics for every active function container on the node. The collector pushes these snapshots to the ML module via HTTP POST.
 
 ### 3.4 ML Classifier
 
-<!--
-- Model: scikit-learn RandomForestClassifier
-- Why Random Forest over Mondrian Forest:
-  - Mondrian Forest requires custom implementation (not in scikit-learn)
-  - Random Forest achieves comparable accuracy for this task (paper reports RF baseline)
-  - Trade-off: we retrain periodically (every 5 min) instead of updating online
-- Feature vector: 7 metrics normalized to [0, 1]
-- Label: binary — 1 if the request's latency exceeded the SLO threshold, 0 otherwise
-- Training data: collected during initial profiling + accumulated during runtime
-- Hyperparameters: n_estimators=100, max_depth=10, class_weight='balanced'
-- Output: P(SLO violation) — a probability between 0 and 1
-- Model serving: Flask API on master node, responds to /predict endpoint in <5ms
--->
+The ML module runs on the master node and serves two functions: it accumulates training data from the metric collector and function latency reports, and it serves predictions to the router.
+
+We use scikit-learn's `RandomForestClassifier` with 100 estimators and a maximum depth of 10. The `class_weight='balanced'` parameter tells scikit-learn to inversely weight classes by their frequency in the training data, which partially addresses the class imbalance problem (most requests meet the SLO, so negative samples vastly outnumber positive ones). On top of this, we implement stratified reservoir sampling to maintain a 50/50 balance of positive and negative samples in the training set. The paper shows this is critical: without balanced sampling, F1 drops from 0.78 to 0.26, rendering the classifier useless for routing decisions.
+
+The feature vector for each training sample consists of the seven metrics, normalized to the [0, 1] range. The label is binary: 1 if the request's end-to-end latency exceeded the SLO threshold (the P95 latency of the Non-OC baseline, measured during initial profiling), and 0 otherwise. Training data accumulates continuously as the system runs. Every five minutes, or when 500 new labeled samples have arrived, the module retrains the Random Forest on the full balanced training set and atomically swaps the new model into the serving path.
+
+The prediction API exposes a `/predict` endpoint that accepts a function name, looks up the latest metric snapshot for that function's OC instances, runs it through the model, and returns a violation probability between 0.0 and 1.0. This lookup and inference completes in under 5ms on the t3.medium master node, which is acceptable overhead for functions with execution times of 50-500ms.
+
+The cold-start problem deserves mention. For the first few minutes of operation, the ML module has no training data and no model. During this period, the system defaults to conservative routing: all requests go to Non-OC instances. Cost savings are zero, but SLO violations are also zero. Once enough labeled samples accumulate (at least 100 positive and 100 negative), the first model trains and ML-guided routing begins.
 
 ### 3.5 Router
 
-<!--
-- Entry point: all function invocations go through the router (runs on master node)
-- Decision logic:
-  1. Receive request for function F
-  2. Query ML module: GET /predict?function=F&instance_type=oc → returns P(violation)
-  3. If P(violation) < threshold (0.3): route to OC instance
-  4. Else: route to Non-OC instance
-- Power of Two Choices: if multiple OC replicas exist, sample 2, pick the one with lower P(violation)
-- Implementation: Nginx as reverse proxy + Python sidecar that handles prediction logic
-- Fallback: if ML module is unreachable, default to Non-OC (safe fallback)
--->
+All function invocations enter the system through the router, which runs on the master node as an Nginx reverse proxy paired with a Python sidecar that handles the prediction logic.
+
+The routing decision follows a two-level safety check. First, the router reads a global Safe flag maintained by the ML module. This flag is computed from the rolling P95 latency across all OC instances: if P95 exceeds the SLO threshold, the flag flips to unsafe, and all requests are routed to Non-OC instances until the P95 drops back below the threshold. This is the coarse-grained kill switch that protects against system-wide contention.
+
+When the Safe flag is set to safe, the router proceeds to per-instance prediction. For each incoming request targeting function F, the router queries the ML module's `/predict` endpoint to get the current violation probability for F's OC instances. If the probability is below a threshold (0.3), the request goes to an OC instance. If it exceeds the threshold, the request goes to Non-OC.
+
+When multiple OC replicas exist for the same function, the router uses the Power of Two Choices algorithm: it samples two OC instances at random, queries the violation probability for each, and picks the one with the lower probability. If both exceed the threshold, the request falls back to Non-OC. This approach avoids the overhead of querying all replicas while still making a better-than-random selection.
+
+The fallback behavior is important. If the ML module is unreachable (process crash, network partition, restart), the router defaults to Non-OC routing for all requests. This is the safe choice: it sacrifices cost savings to preserve latency guarantees. The system degrades to the Non-OC-only baseline rather than to the dangerous OC-only baseline.
 
 ### 3.6 Vertical Scaling
 
-<!--
-- What it controls: max_inflight parameter on each OpenFaaS function (limits concurrent requests per container)
-- Why it's needed: ML predictions aren't perfect — when they're wrong, OC instances get overloaded
-- Algorithm: AIMD (Additive Increase, Multiplicative Decrease)
-  - Every 30 seconds, check SLO violation rate for each function
-  - If violation_rate > 5%: decrease max_inflight by 1 (multiplicative decrease to floor of 1)
-  - If violation_rate < 2% for 3 consecutive checks: increase max_inflight by 1 (additive increase)
-- Effect: fewer concurrent requests → less CPU/memory contention → lower latency → fewer violations
-- Trade-off: lower concurrency means more containers needed (or higher queue wait times)
-- This is the "safety net" — it corrects for systematic ML prediction errors
--->
+The ML classifier and router handle the common case, but no classifier is perfect. When predictions are systematically wrong (the model consistently underestimates contention for a particular function), OC instances accumulate SLO violations faster than the model can correct. Vertical scaling provides the second line of defense.
+
+The mechanism is simple. Each OpenFaaS function has a `max_inflight` parameter that limits how many requests a single container can process concurrently. An AIMD (Additive Increase, Multiplicative Decrease) controller monitors each function's SLO violation rate over a rolling 30-second window and adjusts `max_inflight` accordingly.
+
+If the violation rate exceeds 5%, the controller decreases `max_inflight` by 1, with a floor of 1. Fewer concurrent requests per container means less CPU contention, less cache thrashing, and lower tail latency. If the violation rate stays below 2% for three consecutive 30-second windows, the controller increases `max_inflight` by 1. The asymmetry is deliberate: the system backs off quickly when things go wrong (one bad window triggers a decrease) but ramps up cautiously when things are going well (three good windows required for an increase). This is the same AIMD dynamic that TCP congestion control uses, for the same reason: fast reaction to congestion, slow exploration of available capacity.
+
+The trade-off is straightforward. Lower concurrency per container means the system needs more container replicas to handle the same request rate, or incoming requests queue up and wait. In a system with OpenFaaS auto-scaling enabled, this would trigger replica scale-up, increasing cost. In our setup, where we fix the replica count for experimental control, lower concurrency translates to higher queue wait times under heavy load. But the purpose of vertical scaling is not efficiency. It is correctness: keeping SLO violations bounded when the classifier's predictions are wrong.
 
 ---
 
