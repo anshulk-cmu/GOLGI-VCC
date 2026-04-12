@@ -7,7 +7,7 @@
 # Installs:
 #   - k3s server (API server + etcd + scheduler + kubelet + containerd)
 #   - kubectl, crictl, ctr symlinks
-#   - Traefik disabled (we use our own Golgi router)
+#   - Traefik disabled (functions accessed directly via OpenFaaS gateway)
 #   - Kubeconfig readable by all users (mode 644)
 
 set -euo pipefail

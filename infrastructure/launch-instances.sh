@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# launch-instances.sh — Provision 5 EC2 instances for the Golgi cluster.
+# launch-instances.sh — Provision 5 EC2 instances for the overcommitment study cluster.
 #
 # Usage: bash launch-instances.sh <SUBNET_ID> <SG_ID>
 # Prerequisites: setup-vpc.sh completed, SSH key pair 'golgi-key' exists
 #
 # Creates:
-#   1. golgi-master   (t3.medium)  — k3s server, OpenFaaS gateway, Golgi router
+#   1. golgi-master   (t3.medium)  — k3s server, OpenFaaS gateway
 #   2. golgi-worker-1 (t3.xlarge)  — function containers
 #   3. golgi-worker-2 (t3.xlarge)  — function containers
 #   4. golgi-worker-3 (t3.xlarge)  — function containers

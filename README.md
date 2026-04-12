@@ -15,9 +15,9 @@ Serverless functions waste resources. Studies show functions use only ~25% of th
 
 The obvious fix — giving functions fewer resources (overcommitment) — causes latency spikes when multiple squeezed containers compete for shared hardware. The Golgi paper reports up to 183% P95 latency increase with blind overcommitment.
 
-But is the impact uniform? The Golgi paper hypothesizes that different workload profiles respond differently to overcommitment — CPU-bound functions degrade proportionally, I/O-bound functions are resilient, and mixed functions exhibit non-linear degradation from CFS scheduler interactions. They build an ML-guided routing system on this hypothesis, but the hypothesis itself is assumed, not independently validated.
+But is the impact uniform? The Linux CFS (Completely Fair Scheduler) enforces CPU limits via a quota-and-period mechanism that interacts differently with different workload profiles. CPU-bound functions exhaust their quota predictably; I/O-bound functions release quota during network waits; mixed functions can trigger non-linear throttling when their CPU burst size sits near the quota boundary. The Golgi paper (SoCC 2023) builds an ML-guided routing system on the assumption that these profiles respond differently — but the underlying profile-dependent degradation behavior is assumed, not independently characterized.
 
-**We provide that validation.**
+**We provide that characterization.**
 
 ## What We Do
 
@@ -79,7 +79,7 @@ Measured from 200 sequential requests per function on 2026-04-12:
 | log-filter | Mixed (Non-OC) | 500m | 16ms | **17ms** | 18ms | 16ms | 0/200 |
 | log-filter-oc | Mixed (OC) | 206m | 25ms | 77ms | 96ms | 35ms | 0/200 |
 
-**Key finding:** Overcommitment impact varies by profile — CPU-bound functions degrade 2.4× (proportional to CPU cut), I/O-bound degrade only 1.3×, and mixed functions show 4.5× degradation from bimodal CFS throttling. This validates the Golgi paper's core hypothesis that different function profiles respond differently to overcommitment.
+**Key finding:** Overcommitment impact varies by profile — CPU-bound functions degrade 2.4× (proportional to CPU cut), I/O-bound degrade only 1.3×, and mixed functions show 4.5× P95 degradation with bimodal CFS throttling. Different workload profiles respond fundamentally differently to resource overcommitment, consistent with the profile-dependent degradation behavior that motivates systems like Golgi.
 
 ### Phase 1 Plots
 

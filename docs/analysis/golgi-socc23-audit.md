@@ -283,7 +283,7 @@ The following hyperparameters are used throughout the paper without ablation stu
 
 4. **The results should be treated as directionally correct but not precisely reproducible.** The 42% cost saving is likely in the right ballpark for the specific workload tested, but expect variance with different functions, traces, or cluster sizes.
 
-5. **For your CSL7510 project:** Focus on demonstrating the principle (OC vs Non-OC routing with ML-based prediction) rather than hitting exact numbers. The simplified version in your build plan is well-scoped.
+5. **For the CSL7510 project:** This audit informed the decision to focus on empirical characterization of the overcommitment hypothesis rather than a full system replication. The profile-dependent degradation behavior is the testable foundation — validating it is a standalone contribution.
 
 ---
 

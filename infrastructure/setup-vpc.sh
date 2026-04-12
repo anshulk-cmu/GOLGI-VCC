@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # setup-vpc.sh — Create VPC, subnet, internet gateway, route table, and security group
-# for the Golgi replication cluster.
+# for the overcommitment characterization cluster.
 #
 # Usage: bash setup-vpc.sh
-# Prerequisites: AWS CLI configured with golgi-admin credentials (us-east-1)
+# Prerequisites: AWS CLI configured with project credentials (us-east-1)
 #
 # This script creates:
 #   1. VPC (10.0.0.0/16) tagged golgi-vpc
@@ -51,7 +51,7 @@ echo "Auto-assign public IP enabled on subnet"
 echo "=== Step 0.9: Create Security Group ==="
 SG_ID=$(aws ec2 create-security-group \
   --group-name golgi-sg \
-  --description "Golgi cluster security group" \
+  --description "Serverless overcommitment study security group" \
   --vpc-id "$VPC_ID" \
   --query 'GroupId' --output text)
 echo "Security group created: $SG_ID"

@@ -1,4 +1,4 @@
-# Replicating Golgi: Performance-Aware, Resource-Efficient Function Scheduling for Serverless Computing
+# Characterizing the Impact of Resource Overcommitment on Serverless Function Latency Across Workload Profiles
 
 **Course:** CSL7510 — Cloud Computing  
 **Students:** Anshul Kumar (M25AI2036), Neha Prasad (M25AI2056)  
@@ -11,7 +11,7 @@
 ## Abstract
 
 <!-- ~200 words. Write after all experiments are complete. -->
-<!-- Structure: Problem → Golgi's solution → What we replicated → Key results (cost reduction %, SLO violation rate) → One-line conclusion -->
+<!-- Structure: Problem (serverless resource waste, overcommitment risk) → Untested assumption (profile-dependent degradation) → What we did (empirical characterization across 3 profiles, 4 experiments) → Key results (degradation curves, concurrency amplification, tail latency, CFS boundary effects) → One-line conclusion (profile-dependent degradation confirmed and mechanistically explained) -->
 
 ---
 
@@ -19,9 +19,9 @@
 
 1. [Introduction](#1-introduction)
 2. [Background and Related Work](#2-background-and-related-work)
-3. [System Design](#3-system-design)
+3. [Experimental Design](#3-experimental-design)
 4. [Implementation](#4-implementation)
-5. [Experimental Setup](#5-experimental-setup)
+5. [Baseline Characterization](#5-baseline-characterization)
 6. [Results and Analysis](#6-results-and-analysis)
 7. [Discussion](#7-discussion)
 8. [Conclusion](#8-conclusion)
@@ -49,45 +49,52 @@ Serverless functions are a different animal. They are short-lived (milliseconds 
 
 Li et al. [1] measured this directly. Blind overcommitment on their test cluster caused P95 latency to increase by up to 183%. For a function serving an API endpoint with a 200ms SLO, that kind of degradation is a contract violation. Users choose serverless precisely because they don't want to think about infrastructure. If the platform silently makes their functions 2.8x slower during peak load, the abstraction has broken its promise.
 
-The challenge, then, is not whether to overcommit, but how to overcommit safely: capture the cost savings of reduced allocation without causing the latency spikes that make overcommitment dangerous.
+The challenge, then, is not whether to overcommit, but how to overcommit intelligently. Understanding which functions tolerate reduced resources and which do not is a prerequisite for any safe overcommitment strategy.
 
-### 1.3 The Golgi Approach
+### 1.3 The Golgi Hypothesis
 
-Golgi, proposed by Li et al. [1] at ACM SoCC 2023 (where it won the Best Paper award), offers one answer. The core idea is a two-instance model. For each serverless function, the platform maintains two types of container instances: Non-OC (non-overcommitted) instances with full reserved resources, and OC (overcommitted) instances with reduced resources based on actual measured usage. Non-OC instances are safe but expensive. OC instances are cheap but risky.
+Golgi, proposed by Li et al. [1] at ACM SoCC 2023 (where it won the Best Paper award), addresses this challenge with an ML-guided routing system. The full system includes a two-instance model (Non-OC and OC variants of each function), a Mondrian Forest classifier that predicts SLO violations from real-time cgroup metrics, a request router that directs traffic to OC or Non-OC instances based on predictions, and an AIMD vertical scaler that adjusts concurrency limits. On seven c5.9xlarge workers running eight benchmark functions under Azure Function trace replay, Golgi achieved 42% memory cost reduction while keeping SLO violations below 5%.
 
-The key observation is that contention on OC instances is not constant. Most of the time, the reduced resources are perfectly adequate, because the co-located functions on that host happen not to be spiking simultaneously. Contention is a transient condition. If the system can predict when contention is about to cause trouble, it can route those specific requests to Non-OC instances and send everything else to the cheaper OC instances.
+But the Golgi system is built on a foundational hypothesis that is assumed rather than independently validated:
 
-Golgi does this prediction with a Mondrian Forest, an online variant of Random Forests that updates incrementally as new data arrives. The classifier takes as input nine real-time metrics scraped from each container's cgroup (CPU utilization, memory usage, network I/O, disk I/O, inflight request count, and LLC cache miss rate) and outputs a binary prediction: will this request violate the latency SLO if sent to an OC instance right now? A router sits in front of all function instances, queries the classifier for each incoming request, and directs it to OC or Non-OC accordingly.
+> **Different function workload profiles respond differently to resource overcommitment. CPU-bound functions degrade proportionally to CPU reduction, I/O-bound functions are resilient, and mixed functions exhibit non-linear degradation from Linux CFS scheduler interactions.**
 
-Because no classifier is perfect, Golgi adds a second safety mechanism: vertical scaling. An AIMD (Additive Increase, Multiplicative Decrease) controller monitors the actual SLO violation rate on each OC instance and adjusts its maximum concurrency limit. If violations are rising, the controller reduces concurrency (fewer requests per container, less contention). If violations are low, it gradually allows more concurrency. This acts as a correction loop for systematic prediction errors.
+The Golgi paper's evaluation focuses on end-to-end system metrics — cost reduction percentages and SLO violation rates. These results demonstrate that the full system works, but they do not isolate and characterize the underlying profile-dependent degradation behavior that the system relies upon. The hypothesis is the foundation on which the ML classifier, the routing logic, and the two-instance architecture all rest. If the hypothesis is wrong — if all profiles degrade similarly, or if the degradation is not predictable — the entire Golgi architecture loses its rationale.
 
-The results are strong. On a cluster of seven c5.9xlarge workers running eight benchmark functions under Azure Function trace replay, Golgi achieved 42% memory cost reduction while keeping SLO violations below 5%.
+### 1.4 Motivation for This Study
 
-### 1.4 Motivation for Replication
+We characterize how Linux CFS quota enforcement creates profile-dependent latency degradation under container resource overcommitment — the phenomenon that motivates profile-aware scheduling systems like Golgi. Rather than rebuilding the Golgi system, we design controlled experiments that isolate overcommitment's effect on latency across three workload profiles: CPU-bound, I/O-bound, and mixed. Our approach goes beyond the single-point OC-vs-Non-OC comparison implicit in the Golgi paper and produces detailed characterization data that the paper does not provide.
 
-We replicate Golgi for three reasons, one of which makes the effort considerably harder than a typical reproduction study.
+We are motivated by three observations.
 
-First, the paper's claims are worth testing on different hardware and software. The original evaluation ran on c5.9xlarge instances (36 vCPUs, 72 GB RAM each) with what was likely cgroup v1 on an older kernel. Our cluster uses t3.xlarge instances (4 vCPUs, 16 GB RAM) with cgroup v2 on kernel 6.1. If the system's gains depend on specific hardware characteristics (deep out-of-order pipelines, large LLC, high memory bandwidth), our commodity hardware will expose that dependency. If the gains hold, it strengthens the paper's generality claims.
+First, the profile-dependent degradation phenomenon deserves standalone characterization. The Golgi paper treats it as a given and moves directly to building a system that exploits it. If the underlying behavior is more nuanced than the paper assumes — if, for example, mixed functions degrade at some overcommitment levels but not others, or if concurrent load changes the degradation pattern — those nuances matter for anyone designing overcommitment-aware schedulers.
 
-Second, replication surfaces trade-offs that papers necessarily compress. The paper describes a Mondrian Forest classifier, a metric collection daemon, a modified scheduler, and a vertical scaler in roughly twelve pages. Building each component from scratch forces us to confront decisions the authors made but did not discuss: how to handle cgroup path discovery when containers restart, what to do during the classifier's cold-start period before enough training data exists, how to set the SLO threshold without access to the original function code.
+Second, the CFS mechanism that the paper invokes for mixed-function degradation is testable. The Linux CFS bandwidth controller enforces CPU limits via a quota-and-period mechanism. When a container's CPU burst size sits near the quota boundary, some bursts complete within a single period while others spill into the next period and incur a full-period throttling penalty. This creates bimodal latency. We can validate this explanation experimentally by varying the quota boundary relative to the function's burst size and observing whether the bimodal distribution appears and disappears as predicted.
 
-Third, and most critically: Li et al. did not release source code. No public GitHub repository exists. No implementation artifacts are available. Every component of our replication, from the metric collector to the ML module to the routing logic, is built from scratch using only the paper's text, figures, and evaluation methodology as guidance. Where the paper is ambiguous (and it is, on several implementation details), we make our own engineering choices and document them. This makes the replication a genuine test of whether the paper provides enough detail for independent reproduction, which is itself a valuable finding regardless of whether the performance numbers match.
+Third, degradation curves are more useful than point comparisons. Knowing that a CPU-bound function is 2.4x slower at one specific overcommitment level tells an operator very little. Knowing that degradation is linear from 100% to 40% CPU but accelerates sharply below 40% gives an operator actionable guidance for setting overcommitment policies. We produce these curves.
 
-### 1.5 Scope and Contributions
+### 1.5 Research Questions and Contributions
 
-This is a clean-room replication built by two M.Tech students over one semester, running on a personal AWS budget of approximately $50-100 total. We do not attempt pixel-perfect reproduction of the original results. Instead, we build a faithful but simplified version that preserves the paper's core architectural contributions while making justified substitutions where the original is infeasible to reproduce.
+We address four research questions through four controlled experiments on real AWS infrastructure:
 
-Our system runs on five EC2 instances: one t3.medium master, three t3.xlarge workers, and one t3.medium load generator, orchestrated with k3s and OpenFaaS. We deploy three benchmark functions (instead of eight) covering CPU-bound, I/O-bound, and mixed workload profiles. Three functions are enough to demonstrate that the routing system differentiates between workload types; adding five more would increase development time without changing the principle being tested.
+| # | Research Question | Experiment |
+|---|---|---|
+| RQ1 | How does P95 latency degrade as CPU allocation decreases, and does the degradation curve differ by workload profile? | Multi-level degradation curves (5 CPU levels × 3 functions) |
+| RQ2 | Does concurrent load amplify overcommitment-induced degradation, and is the amplification profile-dependent? | Concurrency sweep (4 concurrency levels × 6 function variants) |
+| RQ3 | How does overcommitment affect tail latency (P99, P99.9) compared to median behavior? | Tail latency analysis |
+| RQ4 | Can the bimodal latency behavior of mixed functions under overcommitment be explained by CFS quota boundary effects? | CFS boundary analysis (fine-grained CPU sweep) |
 
-We use scikit-learn's Random Forest instead of a Mondrian Forest. No maintained open-source Mondrian Forest implementation exists for Python, and the paper's own evaluation shows that a batch-trained Random Forest achieves F1 scores of 0.71-0.84, nearly matching the Mondrian Forest's 0.70-0.84 range. The trade-off is that we retrain periodically (every five minutes) rather than updating online, which introduces a staleness window that the original system avoids. We collect seven of the paper's nine metrics, dropping LLC cache miss rate and memory bandwidth because reading hardware performance counters requires `perf_event_open` privileges and kernel configuration that conflicts with k3s's containerized architecture.
+Our contributions are:
 
-We test three of the paper's central claims: that ML-guided routing reduces memory cost compared to uniform allocation, that SLO violations remain below an acceptable threshold during this cost reduction, and that vertical scaling provides a meaningful safety net when the classifier makes errors.
-
-We make three contributions. First, to our knowledge, this is the first independent replication of Golgi on commodity hardware. Second, we implement the full system on cgroup v2 (the paper likely used cgroup v1), documenting the differences in file paths, metric parsing, and unified hierarchy behavior. Third, we compare Random Forest against the paper's reported Mondrian Forest results in this specific classification task, testing whether the simpler model is a viable substitute that lowers the barrier for future replications.
+1. **Degradation curves** showing the relationship between CPU allocation and P95 latency for three workload profiles, tested at five overcommitment levels on real infrastructure — not simulation.
+2. **Contention analysis** demonstrating how concurrent load interacts with overcommitment, revealing whether superlinear degradation occurs for specific profiles.
+3. **Tail latency characterization** showing whether overcommitment amplifies tail latency disproportionately for profiles near CFS quota boundaries.
+4. **Mechanistic validation** of bimodal CFS throttling behavior in mixed workloads, tested experimentally by manipulating the quota boundary.
+5. **Empirical characterization** of the profile-dependent degradation phenomenon — the foundational observation that motivates profile-aware scheduling systems like Golgi — grounded in direct measurement rather than system-level end-to-end metrics.
 
 ### 1.6 Report Organization
 
-Section 2 covers background on serverless computing, resource overcommitment in cloud systems, and existing scheduling approaches, ending with a detailed description of the Golgi paper's design. Section 3 describes our system architecture: the two-instance model, metric collector, ML classifier, router, and vertical scaler. Section 4 covers implementation specifics, including infrastructure setup, benchmark functions, cgroup v2 metric parsing, and the load generator. Section 5 defines the experimental setup: hardware configuration, workload patterns, baselines, metrics, and SLO definitions. Section 6 presents results and analysis. Section 7 discusses findings, limitations, threats to validity, and lessons learned. Section 8 concludes.
+Section 2 covers background on serverless computing, resource overcommitment in cloud systems, the Linux CFS scheduler, and the Golgi paper's design. Section 3 describes our experimental design: the two-instance model, benchmark functions, overcommitment calculations, and the four experiments. Section 4 covers implementation specifics: AWS infrastructure, k3s cluster setup, OpenFaaS deployment, and benchmark function construction. Section 5 presents baseline characterization results that establish SLO thresholds and validate the experimental setup. Section 6 will present results from the four main experiments. Section 7 discusses findings, limitations, and threats to validity. Section 8 concludes.
 
 ---
 
@@ -121,7 +128,7 @@ The Kubernetes default scheduler takes a bin-packing approach based on declared 
 
 Several research systems have addressed parts of this problem. Harvest VMs (Ambati et al. [4]) let low-priority workloads consume spare capacity on partially-utilized servers, but offer no latency guarantees when the primary workload reclaims its resources. Kraken (Wen et al. [5]) focuses on cold-start-aware container provisioning for DAG-structured serverless workflows. It reduces end-to-end latency by pre-warming containers along the critical path, but does not address the resource overcommitment problem. ENSURE (Suresh et al. [6]) provides SLO-aware scheduling for serverless functions, but operates reactively: it detects violations after they happen and adjusts resource allocations in response, rather than predicting and preventing them.
 
-The gap in the literature is a system that combines three capabilities: proactive prediction of resource contention before it causes latency violations, routing decisions that exploit the difference between overcommitted and fully-provisioned instances, and an adaptive feedback mechanism that corrects for prediction errors. Golgi fills this gap.
+The gap in the literature is a system that combines proactive prediction of resource contention, routing decisions that exploit the difference between overcommitted and fully-provisioned instances, and an adaptive feedback mechanism. Golgi fills this gap with a complete system. But underneath every contention-aware scheduling system lies an assumption: that contention's effect on latency is predictable and varies by workload profile. This assumption has not been independently characterized. Our work provides that characterization.
 
 ### 2.4 The Golgi Paper in Detail
 
@@ -137,334 +144,234 @@ Vertical scaling provides a second layer of defense. An AIMD controller on each 
 
 The original evaluation used eight benchmark functions spanning five languages, deployed on seven c5.9xlarge workers (36 vCPUs, 72 GB RAM each), driven by replayed Azure Function Trace workloads. Golgi achieved 42% memory cost reduction, 35% VM time reduction, and kept SLO violations below 5%.
 
-### 2.5 Differences from the Original
+### 2.5 Relationship Between Our Study and the Golgi System
 
-Table 1 summarizes the key differences between our replication and the original system.
+Table 1 clarifies the relationship between our empirical study and the Golgi system. Our work is not a replication of Golgi. We do not build an ML classifier, a request router, or a vertical scaler. Instead, we characterize the profile-dependent degradation phenomenon that the Golgi system is built upon.
 
-| Dimension | Original (Li et al.) | Our Replication |
+**Table 1: Scope comparison between the Golgi system and our empirical study.**
+
+| Dimension | Golgi (Li et al.) | Our Study |
 |---|---|---|
-| Cluster size | 7 workers (c5.9xlarge: 36 vCPU, 72 GB) | 3 workers (t3.xlarge: 4 vCPU, 16 GB) |
-| Benchmark functions | 8 functions in 5 languages | 3 functions in Python/Go |
-| ML classifier | Mondrian Forest (online, incremental) | Random Forest (batch retrain every 5 min) |
-| Metrics collected | 9 (including LLC miss rate, memory bandwidth) | 7 (excluding LLC miss rate, memory bandwidth) |
-| Workload | Azure Function Trace replay | Synthetic Locust traces (steady, bursty, ramp) |
-| Router implementation | Modified faas-netes (Go) | Nginx + Python sidecar |
-| Metric collection | Go relay daemon | Python DaemonSet |
-| Inter-component RPC | gRPC | HTTP REST (Flask) |
+| **Goal** | Build an ML-guided overcommitment routing system | Characterize profile-dependent degradation under overcommitment |
+| **Approach** | End-to-end system (classifier + router + scaler) | Controlled experiments isolating overcommitment effects |
+| **What is measured** | Cost reduction, SLO violation rate (system metrics) | Degradation curves, tail latency, CFS throttling behavior (characterization data) |
+| **Cluster** | 7× c5.9xlarge (36 vCPU, 72 GB each) | 3× t3.xlarge (4 vCPU, 16 GB each) |
+| **Functions** | 8 functions in 5 languages | 3 functions in Python/Go (one per profile) |
+| **Overcommitment levels** | One OC level per function (formula-derived) | Five levels per function (100%, 80%, 60%, 40%, 20% CPU) |
+| **Concurrency** | Replayed Azure traces (variable) | Controlled sweep (1, 2, 4, 8 concurrent requests) |
+| **CFS analysis** | Mentioned as explanation for mixed-function behavior | Experimentally characterized via fine-grained quota manipulation |
+| **ML/Routing** | Core contribution (Mondrian Forest + Power-of-Two router) | Not in scope — we characterize the phenomenon that motivates these components |
 
-Each simplification preserves the paper's core contribution: ML-guided routing between overcommitted and fully-provisioned instances. The ML model change is the most consequential, since it replaces online learning with periodic batch retraining, introducing a staleness window of up to five minutes. The paper's own evaluation partially addresses this concern by reporting that batch-trained Random Forest achieves F1 scores of 0.71-0.84, nearly matching the Mondrian Forest's 0.70-0.84 range.
-
-We expect our results to show lower cost savings than the original (roughly 25-30% versus 42%) due to fewer functions offering less opportunity for statistical multiplexing and a smaller cluster providing less co-location diversity. We also expect a higher SLO violation rate (roughly 8% versus under 5%) due to the missing LLC metrics and the retraining delay. Both outcomes would still validate the paper's core thesis that ML-guided overcommitment routing is practical and beneficial, if at a reduced magnitude.
+The Golgi paper assumes that overcommitment impact is profile-dependent and uses that assumption to justify building a complex scheduling system. We characterize whether this profile-dependent degradation exists, how it manifests across overcommitment levels and concurrency, and what mechanism drives it. This characterization is valuable regardless of whether it aligns with or complicates the Golgi paper's assumptions — either outcome informs the design of overcommitment-aware schedulers.
 
 ---
 
-## 3. System Design
+## 3. Experimental Design
 
-This section describes the architecture of our replication at the design level. Implementation details (specific tools, configurations, code) follow in Section 4.
+This section describes the design of our empirical study: the two-instance model we adopt from the Golgi paper, the benchmark functions that cover three workload profiles, the overcommitment calculations, and the four experiments we run to characterize degradation behavior. Implementation details (infrastructure, deployment, tooling) follow in Section 4.
 
-### 3.1 Architecture Overview
+### 3.1 Overview
 
-The system has two planes. The data plane handles request traffic: a load generator sends HTTP requests to the router, which forwards each request to either an OC or Non-OC function instance based on the ML classifier's prediction. The function executes, returns a response, and the router forwards it back to the client. The control plane operates alongside but asynchronously: metric collectors on each worker node scrape container-level resource usage, push it to the ML module, and the ML module periodically retrains its classifier and updates the prediction labels that the router reads.
+Our study design has two parts. First, we establish a controlled environment for measuring overcommitment effects: a k3s/OpenFaaS cluster on AWS with three benchmark functions, each deployed in both a Non-OC (full-resource) and an OC (overcommitted) variant. Second, we run four experiments that systematically vary overcommitment level, concurrency, and CFS quota parameters while measuring latency at multiple percentiles.
 
 ```
-                    +-----------------+
-                    | Load Generator  |
-                    |    (Locust)     |
-                    +-------+---------+
-                            |
-                            | HTTP
-                            v
-                    +-----------------+
-                    |     Router      |
-                    | (Nginx+Python)  |
-                    +--+-----------+--+
-                       |           |
-              Non-OC   |           |   OC
-                       v           v
-                 +-----------+ +-----------+
-                 | Function  | | Function  |
-                 | Instances | | Instances |
-                 | (full     | | (reduced  |
-                 |  resources| |  resources|
-                 +-----+-----+ +-----+-----+
-                       |             |
-                       +------+------+
-                              | metrics + latency
-                              v
-                    +-----------------+       +------------------+
-                    |   ML Module     |<------| Metric Collector |
-                    |   (Flask API)   |  push | (DaemonSet)      |
-                    +-----------------+       +------------------+
+                         +-----------------+
+                         | Load Generator  |
+                         | (bash/curl)     |
+                         +-------+---------+
+                                 |
+                                 | HTTP (sequential or concurrent)
+                                 v
+                         +-----------------+
+                         | OpenFaaS Gateway|
+                         | (port 31112)    |
+                         +--+-----------+--+
+                            |           |
+                   Non-OC   |           |   OC
+                            v           v
+                      +-----------+ +-----------+
+                      | Function  | | Function  |
+                      | (full CPU | | (reduced  |
+                      |  & memory)| |  CPU/mem) |
+                      +-----------+ +-----------+
+                            |           |
+                            v           v
+                      [Latency recorded per request]
+                      [cgroup metrics: cpu.stat, memory.current]
 ```
 
-The separation matters because data plane latency is on the critical path of every request. The router's prediction lookup must complete in single-digit milliseconds. The control plane, by contrast, operates on a slower cadence: metrics are scraped every 500ms, and the model retrains every five minutes. Keeping these concerns separate means a slow retraining cycle never blocks request handling.
+The key design principle is isolation. Each experiment varies one factor at a time. The baseline (Phase 1) holds concurrency at 1 and compares Non-OC vs OC at a single overcommitment level. The degradation curve experiment (Phase 2) varies CPU allocation across five levels while holding concurrency at 1. The concurrency sweep (Phase 3) crosses two overcommitment levels with four concurrency levels. The CFS boundary analysis (Phase 5) performs a fine-grained CPU sweep on a single function. This factorial structure lets us attribute latency changes to specific causes.
 
 ### 3.2 Two-Instance Model
 
-The foundation of Golgi's design is running two variants of every function, identical in code but different in resource allocation. Non-OC instances receive the full resources the user declared. OC instances receive reduced resources computed from observed actual usage using the formula:
+Following the Golgi paper's methodology, we deploy each function in two variants: Non-OC (non-overcommitted) with the user's declared resource allocation, and OC (overcommitted) with reduced resources computed from observed actual usage. The overcommitment formula from the paper is:
 
 ```
 OC_allocation = α × claimed + (1 - α) × actual
 ```
 
-The paper uses α = 0.3, giving 70% weight to measured usage and retaining 30% of the original reservation as a safety margin. We adopt the same value. Changing α would change the experiment, so we treat it as a fixed parameter rather than something to tune.
+The paper uses α = 0.3, giving 70% weight to measured usage and retaining 30% of the original reservation as a safety margin. We adopt the same value to ensure our OC configurations are directly comparable to those the Golgi system would create.
 
 To measure actual usage, we deploy each function in its Non-OC configuration, send 100 requests under no concurrent load, and record the P75 of memory consumption from the cgroup's `memory.current` file. CPU actual usage is derived similarly from `cpu.stat`. Applying the formula yields the OC resource allocations shown in Table 2.
 
 **Table 2: Resource configurations for Non-OC and OC function variants.**
 
-| Function | Profile | Non-OC Memory | Non-OC CPU | OC Memory | OC CPU |
-|---|---|---|---|---|---|
-| image-resize | CPU-bound | 512 Mi | 1000m | 210 Mi | 405m |
-| db-query | I/O-bound | 256 Mi | 500m | 105 Mi | 185m |
-| log-filter | Mixed | 256 Mi | 500m | 98 Mi | 206m |
+| Function | Profile | Non-OC CPU | OC CPU | CPU Reduction | Non-OC Memory | OC Memory | Memory Reduction |
+|---|---|---|---|---|---|---|---|
+| image-resize | CPU-bound | 1000m | 405m | 2.47× | 512 Mi | 210 Mi | 59% |
+| db-query | I/O-bound | 500m | 185m | 2.70× | 256 Mi | 105 Mi | 59% |
+| log-filter | Mixed | 500m | 206m | 2.43× | 256 Mi | 98 Mi | 62% |
 
-Both variants run from the same container image. The only difference is the Kubernetes resource requests and limits specified in the deployment manifest. This means the OC variant's container has less CPU time available (the kernel's CFS scheduler enforces the CPU limit via cgroup `cpu.max`) and a lower memory ceiling (the kernel's OOM killer fires if `memory.current` exceeds `memory.max`). Under light load, the OC instance performs identically to the Non-OC instance because the function's actual resource consumption falls well within the reduced allocation. Under heavy load, when multiple functions on the same node compete for CPU cycles and memory bandwidth, the OC instance hits its limits first.
+Both variants run from the same container image. The only difference is the Kubernetes resource requests and limits specified in the deployment manifest. The OC variant's container has less CPU time available (the kernel's CFS scheduler enforces the CPU limit via cgroup `cpu.max`) and a lower memory ceiling (the kernel's OOM killer fires if `memory.current` exceeds `memory.max`). Under light load, the OC instance may perform comparably to Non-OC because the function's actual resource consumption falls within the reduced allocation. Under heavier load or with concurrent requests, the OC instance hits its limits, and the degree of degradation depends on the function's workload profile — which is precisely what we measure.
 
-### 3.3 Metric Collector
+### 3.3 Benchmark Functions
 
-The metric collector runs as a Kubernetes DaemonSet, placing exactly one collector pod on each worker node. Each collector scrapes seven metrics from every function container on its node at 500ms intervals, matching the paper's collection frequency.
+We deploy three benchmark functions, one for each major workload profile identified in the Golgi paper. Three functions are the minimum needed to test the hypothesis that profiles respond differently to overcommitment. Each function is designed so that its dominant resource bottleneck is clear and controllable.
 
-The seven metrics are:
+**image-resize (CPU-bound, Python).** Generates a random RGB image (1920×1080 pixels), then downscales it to half size (960×540) using Pillow's Lanczos resampling filter. Lanczos resampling applies a windowed sinc convolution kernel per output pixel, making the computation directly proportional to available CPU cycles. Memory usage is modest and predictable (two image buffers of known size). This function's latency should scale proportionally with CPU reduction, since CPU is the sole bottleneck.
 
-1. **CPU utilization.** Read from the cgroup v2 file `cpu.stat`, which reports cumulative CPU time in microseconds (`usage_usec`). The collector computes utilization as the delta in `usage_usec` divided by the elapsed wall-clock time between two consecutive readings.
+**db-query (I/O-bound, Python).** Connects to a Redis instance running within the cluster and performs a GET → SET → GET sequence. Latency is dominated by network round-trips between the function container and the Redis pod, not by CPU computation. Even with significantly reduced CPU, the function should perform similarly because it spends most of its execution time waiting on network I/O. This function tests the hypothesis that I/O-bound functions are resilient to overcommitment.
 
-2. **Memory utilization.** The ratio of `memory.current` (bytes currently allocated) to `memory.max` (the cgroup's memory limit). A value approaching 1.0 signals the container is near its memory ceiling.
+**log-filter (Mixed, Go).** Generates 1000 synthetic log lines, applies regex matching to filter lines containing `ERROR`, `WARN`, or `CRITICAL`, and runs IP address anonymization via regex replacement. This exercises both CPU (regex compilation and matching, string operations) and memory (string allocation, buffer management). Critically, the function's CPU burst size sits near the CFS quota boundary under overcommitment. Some invocations complete within a single CFS period; others spill into the next period and incur a full-period throttling penalty. This creates the bimodal latency distribution that the Golgi paper attributes to CFS interactions. Written in Go to demonstrate language diversity and to ensure the mixed behavior comes from the workload characteristics, not from Python interpreter overhead.
 
-3. **Network bytes sent.** Read from `/proc/[pid]/net/dev` for the container's network namespace, summing the transmit bytes column across all interfaces.
+### 3.4 Experiment Design
 
-4. **Network bytes received.** The receive counterpart from the same file.
+**Experiment 1: Multi-Level Degradation Curves (Phase 2).** For each function, we deploy five variants with CPU allocations at 100%, 80%, 60%, 40%, and 20% of the Non-OC value. We send 200 sequential requests (concurrency = 1) to each variant and record per-request latency. The output is a degradation curve: P95 latency as a function of CPU allocation, plotted separately for each profile. We expect CPU-bound functions to show linear or near-linear degradation, I/O-bound functions to show a flat curve, and mixed functions to show non-linear degradation with a knee at the CFS quota boundary.
 
-5. **Disk I/O.** Parsed from the cgroup v2 file `io.stat`, which reports cumulative bytes read (`rbytes`) and written (`wbytes`) per block device.
+**Experiment 2: Concurrency Sweep (Phase 3).** We test all six function variants (3 functions × {Non-OC, OC}) at four concurrency levels: 1, 2, 4, and 8 simultaneous requests. For each combination, we send 200 total requests and measure latency. This experiment answers whether concurrent load amplifies overcommitment-induced degradation. If degradation is additive (OC penalty + concurrency penalty), the lines on the degradation-vs-concurrency plot will be parallel. If degradation is superlinear (OC and concurrency compound), the OC line will diverge from Non-OC as concurrency increases.
 
-6. **Inflight requests.** Scraped from OpenFaaS's built-in Prometheus endpoint, which exposes `gateway_function_invocation_inflight` as a gauge per function.
+**Experiment 3: Tail Latency Analysis (Phase 4).** Using the data from Experiments 1 and 2, we analyze P50, P95, P99, and P99.9 latencies separately. The question is whether overcommitment amplifies tail latency disproportionately. A function whose median latency increases by 2x but whose P99.9 increases by 10x under overcommitment is far more dangerous for SLO compliance than one where all percentiles scale uniformly. We expect mixed functions to show the most disproportionate tail amplification due to the bimodal CFS throttling.
 
-7. **Invocation rate.** Also from Prometheus: the per-second rate of `gateway_function_invocation_total`, computed over a short window.
-
-Container discovery is the trickiest part of the collector's job. The collector queries the Kubernetes API for all pods in the `openfaas-fn` namespace, extracts each container's ID from the pod status (a string like `containerd://abc123...`), and maps it to a cgroup directory at `/sys/fs/cgroup/kubepods.slice/kubepods-burstable.slice/.../cri-containerd-abc123.scope/`. This mapping is fragile: if a container restarts, it gets a new ID and a new cgroup path. The collector must re-discover paths on every scrape cycle or risk reading stale cgroup files.
-
-Each scrape cycle produces a JSON snapshot containing all seven metrics for every active function container on the node. The collector pushes these snapshots to the ML module via HTTP POST.
-
-### 3.4 ML Classifier
-
-The ML module runs on the master node and serves two functions: it accumulates training data from the metric collector and function latency reports, and it serves predictions to the router.
-
-We use scikit-learn's `RandomForestClassifier` with 100 estimators and a maximum depth of 10. The `class_weight='balanced'` parameter tells scikit-learn to inversely weight classes by their frequency in the training data, which partially addresses the class imbalance problem (most requests meet the SLO, so negative samples vastly outnumber positive ones). On top of this, we implement stratified reservoir sampling to maintain a 50/50 balance of positive and negative samples in the training set. The paper shows this is critical: without balanced sampling, F1 drops from 0.78 to 0.26, rendering the classifier useless for routing decisions.
-
-The feature vector for each training sample consists of the seven metrics, normalized to the [0, 1] range. The label is binary: 1 if the request's end-to-end latency exceeded the SLO threshold (the P95 latency of the Non-OC baseline, measured during initial profiling), and 0 otherwise. Training data accumulates continuously as the system runs. Every five minutes, or when 500 new labeled samples have arrived, the module retrains the Random Forest on the full balanced training set and atomically swaps the new model into the serving path.
-
-The prediction API exposes a `/predict` endpoint that accepts a function name, looks up the latest metric snapshot for that function's OC instances, runs it through the model, and returns a violation probability between 0.0 and 1.0. This lookup and inference completes in under 5ms on the t3.medium master node, which is acceptable overhead for functions with execution times of 50-500ms.
-
-The cold-start problem deserves mention. For the first few minutes of operation, the ML module has no training data and no model. During this period, the system defaults to conservative routing: all requests go to Non-OC instances. Cost savings are zero, but SLO violations are also zero. Once enough labeled samples accumulate (at least 100 positive and 100 negative), the first model trains and ML-guided routing begins.
-
-### 3.5 Router
-
-All function invocations enter the system through the router, which runs on the master node as an Nginx reverse proxy paired with a Python sidecar that handles the prediction logic.
-
-The routing decision follows a two-level safety check. First, the router reads a global Safe flag maintained by the ML module. This flag is computed from the rolling P95 latency across all OC instances: if P95 exceeds the SLO threshold, the flag flips to unsafe, and all requests are routed to Non-OC instances until the P95 drops back below the threshold. This is the coarse-grained kill switch that protects against system-wide contention.
-
-When the Safe flag is set to safe, the router proceeds to per-instance prediction. For each incoming request targeting function F, the router queries the ML module's `/predict` endpoint to get the current violation probability for F's OC instances. If the probability is below a threshold (0.3), the request goes to an OC instance. If it exceeds the threshold, the request goes to Non-OC.
-
-When multiple OC replicas exist for the same function, the router uses the Power of Two Choices algorithm: it samples two OC instances at random, queries the violation probability for each, and picks the one with the lower probability. If both exceed the threshold, the request falls back to Non-OC. This approach avoids the overhead of querying all replicas while still making a better-than-random selection.
-
-The fallback behavior is important. If the ML module is unreachable (process crash, network partition, restart), the router defaults to Non-OC routing for all requests. This is the safe choice: it sacrifices cost savings to preserve latency guarantees. The system degrades to the Non-OC-only baseline rather than to the dangerous OC-only baseline.
-
-### 3.6 Vertical Scaling
-
-The ML classifier and router handle the common case, but no classifier is perfect. When predictions are systematically wrong (the model consistently underestimates contention for a particular function), OC instances accumulate SLO violations faster than the model can correct. Vertical scaling provides the second line of defense.
-
-The mechanism is simple. Each OpenFaaS function has a `max_inflight` parameter that limits how many requests a single container can process concurrently. An AIMD (Additive Increase, Multiplicative Decrease) controller monitors each function's SLO violation rate over a rolling 30-second window and adjusts `max_inflight` accordingly.
-
-If the violation rate exceeds 5%, the controller decreases `max_inflight` by 1, with a floor of 1. Fewer concurrent requests per container means less CPU contention, less cache thrashing, and lower tail latency. If the violation rate stays below 2% for three consecutive 30-second windows, the controller increases `max_inflight` by 1. The asymmetry is deliberate: the system backs off quickly when things go wrong (one bad window triggers a decrease) but ramps up cautiously when things are going well (three good windows required for an increase). This is the same AIMD dynamic that TCP congestion control uses, for the same reason: fast reaction to congestion, slow exploration of available capacity.
-
-The trade-off is straightforward. Lower concurrency per container means the system needs more container replicas to handle the same request rate, or incoming requests queue up and wait. In a system with OpenFaaS auto-scaling enabled, this would trigger replica scale-up, increasing cost. In our setup, where we fix the replica count for experimental control, lower concurrency translates to higher queue wait times under heavy load. But the purpose of vertical scaling is not efficiency. It is correctness: keeping SLO violations bounded when the classifier's predictions are wrong.
+**Experiment 4: CFS Boundary Analysis (Phase 5).** This experiment targets the log-filter function specifically. We deploy it with CPU limits swept in fine increments (e.g., 50m steps from 100m to 500m), creating a series of CFS quota boundaries. For each configuration, we send 200 requests and analyze the latency distribution. If the bimodal hypothesis is correct, we should observe: (a) unimodal distributions when the quota is well above or well below the burst size, and (b) bimodal distributions when the quota boundary falls near the burst size. This provides a mechanistic explanation for the mixed-function degradation pattern, grounded in the CFS bandwidth controller's quota-and-period enforcement.
 
 ---
 
 ## 4. Implementation
 
-<!-- Pages 7–8, ~1500 words -->
-
 ### 4.1 Infrastructure Setup
 
-<!--
-- AWS setup: dedicated VPC (10.0.0.0/16), single subnet (10.0.1.0/24), Internet Gateway
-- Security group: SSH (22), K8s API (6443), OpenFaaS (31112), NodePort range (30000-32767), inter-node (all traffic within VPC)
-- EC2 instances: 1 t3.medium master, 3 t3.xlarge workers, 1 t3.medium loadgen
-- Why t3.xlarge for workers: 4 vCPU, 16 GB RAM — enough to run multiple function containers with resource contention
-- k3s deployment: lightweight Kubernetes (single binary, uses containerd, embeds etcd)
-- Why k3s over kubeadm: faster setup (single command), lower memory overhead, same K8s API
-- OpenFaaS deployment: Helm chart, NodePort service type, 5 components (gateway, prometheus, NATS, alertmanager, queue-worker)
-- Networking: NodePort 31112 for gateway access, internal cluster DNS for service discovery
--->
+All resources run on AWS in `us-east-1a` inside a dedicated VPC (`10.0.0.0/16`) with a single subnet (`10.0.1.0/24`). The cluster consists of five EC2 instances:
+
+**Table 3: Cluster nodes and their roles.**
+
+| Node | Instance Type | vCPU | RAM | Role |
+|---|---|---|---|---|
+| golgi-master | t3.medium | 2 | 4 GB | k3s server, OpenFaaS gateway |
+| golgi-worker-1 | t3.xlarge | 4 | 16 GB | Function containers, cgroup measurement |
+| golgi-worker-2 | t3.xlarge | 4 | 16 GB | Function containers, cgroup measurement |
+| golgi-worker-3 | t3.xlarge | 4 | 16 GB | Function containers, cgroup measurement |
+| golgi-loadgen | t3.medium | 2 | 4 GB | Request generation, latency measurement |
+
+We chose t3.xlarge workers (4 vCPU, 16 GB RAM, $0.1664/hr) because four vCPUs provide enough headroom to observe CPU contention when multiple containers compete for CPU time, and 16 GB accommodates 6+ function containers per worker with room for k3s overhead. The paper used c5.9xlarge instances (36 vCPU, 72 GB, $1.53/hr) — our instances are 10× cheaper while still demonstrating the same CFS and cgroup behaviors at a smaller scale. The total cluster cost is approximately $0.58/hr ($14/day).
+
+The Kubernetes layer uses k3s v1.34.6, a lightweight Kubernetes distribution that provides the same API, scheduling, and cgroup enforcement as full Kubernetes but deploys as a single binary with embedded etcd. We chose k3s over kubeadm for faster setup and lower memory overhead — the k3s server uses approximately 500 MB RAM at our scale. We disabled the bundled Traefik ingress controller since we invoke functions directly through the OpenFaaS gateway.
+
+OpenFaaS was deployed via Helm into the `openfaas` namespace, running five components: the HTTP gateway (exposed as NodePort 31112), Prometheus for metrics, NATS for async messaging, AlertManager, and a queue worker. Function invocations go through the gateway at `http://<master-ip>:31112/function/<name>`.
+
+The security group allows SSH from our IP, all intra-VPC traffic (for k3s control plane and pod networking), and the OpenFaaS NodePort range from our IP. All instances run Amazon Linux 2023 (kernel 6.1.166) with cgroup v2 in unified hierarchy mode — the modern cgroup interface that exposes CPU, memory, and I/O metrics through a clean filesystem at `/sys/fs/cgroup/`.
 
 ### 4.2 Benchmark Functions
 
-<!--
-- Function 1: image-resize (Python)
-  - What it does: generates random image → resizes using PIL LANCZOS filter
-  - Why CPU-bound: LANCZOS resampling is compute-intensive (convolution kernel per pixel)
-  - Configurable: image dimensions control workload intensity
-  - Maps to paper's: classify-image, detect-object
-  
-- Function 2: db-query (Python)
-  - What it does: connects to Redis → GET key → SET result → return
-  - Why I/O-bound: latency dominated by network round-trip to Redis, minimal CPU
-  - Redis deployment: single pod in openfaas-fn namespace, 64Mi request / 128Mi limit
-  - Maps to paper's: query-vacancy, ingest-data
-  
-- Function 3: log-filter (Go)
-  - What it does: generates 1000 synthetic log lines → regex filter (ERROR|WARN|CRITICAL) → anonymize IPs
-  - Why mixed: regex matching is CPU-intensive, string allocation is memory-intensive
-  - Written in Go: demonstrates language diversity, lower overhead than Python
-  - Maps to paper's: filter-log, anonymize-log
+Each function is deployed as an OpenFaaS function with two Kubernetes deployment variants: Non-OC (full resources) and OC (overcommitted resources). Both variants use the same container image; only the resource requests and limits in the deployment manifest differ.
 
-- OC/Non-OC variants: same container image, different K8s resource requests/limits in stack.yml
--->
+**image-resize (CPU-bound, Python 3.9).** The handler generates a random RGB image of 1920×1080 pixels by iterating over every pixel and assigning random RGB values using Python's `random` module, then downscales it to 960×540 using Pillow's Lanczos resampling filter. The pixel-by-pixel generation in Python's interpreted loop plus the Lanczos windowed sinc convolution make execution time directly proportional to available CPU cycles. Dependencies: `pillow`. Non-OC allocation: 1000m CPU, 512 Mi memory. OC allocation: 405m CPU, 210 Mi memory (2.47× CPU reduction).
 
-### 4.3 Metric Collection Implementation
+**db-query (I/O-bound, Python 3.9).** The handler connects to a Redis instance (deployed as a single pod in the `openfaas-fn` namespace with 64 Mi request / 128 Mi limit) and performs a GET → SET → GET sequence using the `redis` Python client. Latency is dominated by three network round-trips between the function container and the Redis pod. CPU consumption is minimal — the function spends most of its time waiting on I/O. Non-OC allocation: 500m CPU, 256 Mi memory. OC allocation: 185m CPU, 105 Mi memory (2.70× CPU reduction).
 
-<!--
-- DaemonSet specification: one pod per worker, hostPID access, volume mount to /sys/fs/cgroup
-- Container discovery:
-  1. Query K8s API for pods in openfaas-fn namespace
-  2. Extract container ID from pod status (containerd://abc123...)
-  3. Map to cgroup path: /sys/fs/cgroup/kubepods.slice/.../cri-containerd-abc123.scope/
-- Metric reading (cgroup v2):
-  - CPU: parse cpu.stat → usage_usec, compute delta over 500ms interval
-  - Memory: read memory.current (bytes), divide by memory.max for utilization
-  - I/O: parse io.stat → rbytes, wbytes per device
-- Prometheus scraping: query OpenFaaS's built-in Prometheus for http_requests_in_flight and invocation rate
-- Push mechanism: HTTP POST to master every 500ms with JSON payload
-- Error handling: if cgroup file disappears (container killed), skip and log
--->
+**log-filter (Mixed, Go).** The handler generates 1000 synthetic log lines with randomized timestamps, log levels, and source IPs, then applies regex matching to filter lines containing `ERROR`, `WARN`, or `CRITICAL`, and runs IP anonymization via regex replacement. This exercises CPU (regex compilation and matching, string operations) and memory (string allocation, buffer management). Written in Go to ensure the mixed behavior comes from workload characteristics rather than Python interpreter overhead. Non-OC allocation: 500m CPU, 256 Mi memory. OC allocation: 206m CPU, 98 Mi memory (2.43× CPU reduction).
 
-### 4.4 ML Module Implementation
+All six function variants (3 functions × 2 resource levels) are defined in a single Kubernetes manifest (`functions/functions-deploy.yaml`) and deployed simultaneously. OpenFaaS auto-scaling is disabled (`com.openfaas.scale.min=1`, `com.openfaas.scale.max=1`) to fix replica counts at 1 per variant, ensuring each measurement targets a single container with a known resource allocation.
 
-<!--
-- Flask server running on master node (port 5001)
-- Endpoints:
-  - POST /metrics — receive metric snapshots from collectors (training data accumulation)
-  - POST /label — receive latency labels from the router (matched to metric snapshots by timestamp)
-  - GET /predict?function=X — return P(SLO violation) for function X's OC instance
-  - GET /model/stats — return model accuracy, feature importance, training data size
-- Training pipeline:
-  1. Accumulate metric+label pairs in a pandas DataFrame (in memory)
-  2. Every 5 minutes (or when 500 new samples arrive): retrain the RandomForest
-  3. Replace the live model atomically (no downtime)
-- Feature engineering: raw metrics + derived features (CPU delta, memory delta over last 3 intervals)
-- Cold start problem: for the first 5 minutes (before enough training data), default to conservative routing (all Non-OC)
--->
+### 4.3 Latency Measurement
 
-### 4.5 Router Implementation
+Latency is measured end-to-end at the load generator using `curl` with timing output. The benchmark script (`scripts/benchmark-latency.sh`) sends sequential HTTP POST requests to each function via the OpenFaaS gateway and records the total round-trip time per request. For each function variant, the script sends 200 requests, discards no warm-up period (functions are pre-warmed with 5 requests before measurement begins via `scripts/warmup.sh`), and writes per-request latencies to a raw data file.
 
-<!--
-- Architecture: Nginx (layer 7 reverse proxy) + Python sidecar (prediction logic)
-- Request flow:
-  1. Client sends POST to /function/<name> on Nginx (port 8080)
-  2. Nginx forwards to Python sidecar (via auth_request or upstream decision)
-  3. Python sidecar: queries ML module → decides OC or Non-OC → returns upstream name
-  4. Nginx proxies to the chosen OpenFaaS function variant
-- Why Nginx: handles connection pooling, timeouts, retries — we only add routing logic
-- Latency overhead: prediction adds ~3-5ms (acceptable for functions with 50-500ms latency)
-- Metrics emission: router logs every decision (function, chosen_instance, ML_probability, actual_latency) for analysis
--->
+For concurrent experiments (Phase 3), the script launches multiple `curl` processes in parallel using bash background jobs, collecting latencies from all concurrent streams.
 
-### 4.6 Load Generator
+Statistical analysis is performed by `scripts/compute-stats.py`, which reads the raw latency files and computes P50, P95, P99, P99.9, mean, standard deviation, and error counts. Plots are generated by `scripts/generate-phase1-plots.py` using matplotlib and numpy.
 
-<!--
-- Tool: Locust (Python-based, distributed load testing)
-- Runs on dedicated golgi-loadgen instance (avoids interfering with cluster)
-- Workload profiles:
-  1. Steady: constant 20 req/s per function for 10 minutes
-  2. Bursty: alternating 5 req/s and 50 req/s in 30-second intervals
-  3. Ramp: linear increase from 5 to 60 req/s over 10 minutes
-- Request distribution: equal split across 3 functions (or configurable weights)
-- Measurement: Locust records per-request latency, status code, timestamp
-- Warm-up: first 60 seconds of each experiment discarded (allows model to stabilize)
--->
+### 4.4 cgroup v2 and CFS Configuration
+
+Resource limits are enforced by the Linux kernel's cgroup v2 controllers, configured automatically by k3s based on the Kubernetes resource specifications in our deployment manifests.
+
+**CPU limits** are enforced via the CFS bandwidth controller. A Kubernetes CPU limit of 405m (millicores) translates to a cgroup `cpu.max` value of `40500 100000`, meaning the container gets 40,500 µs of CPU time per 100,000 µs (100 ms) CFS period. When the container exhausts its quota within a period, all its threads are throttled until the next period begins. This throttling mechanism is the primary driver of latency degradation under overcommitment: a function that completes in one CFS period at full CPU may require two or more periods at reduced CPU, with each period boundary adding up to 100 ms of dead time.
+
+**Memory limits** are enforced via the cgroup memory controller. A Kubernetes memory limit of 210 Mi sets `memory.max` to 220200960 bytes. If the container's resident memory (`memory.current`) exceeds this, the kernel's OOM killer terminates the container process.
+
+For the CFS boundary analysis (Phase 5), we deploy the log-filter function with CPU limits swept in fine increments. Each CPU limit creates a different quota-to-period ratio, placing the CFS quota boundary at different points relative to the function's CPU burst size. This is how we experimentally test whether bimodal latency arises from CFS quota boundary crossings.
 
 ---
 
-## 5. Experimental Setup
+## 5. Baseline Characterization
 
-<!-- Pages 9–10, ~1400 words -->
+Before running the four main experiments, we establish baseline latency profiles for all six function variants (3 functions × {Non-OC, OC}). This baseline serves two purposes: it defines the SLO thresholds used throughout the study, and it provides the first evidence for whether the Golgi hypothesis holds.
 
 ### 5.1 Hardware and Software Configuration
 
-<!--
-- Table of all instance specs: type, vCPU, RAM, network bandwidth, EBS volume
-- Software versions: Amazon Linux 2023, kernel 6.1.166, k3s v1.34.6, Python 3.9.25, scikit-learn 1.6.1, OpenFaaS (Helm revision 1), Locust 2.34.0
-- Network: all instances in same subnet (10.0.1.0/24), <1ms inter-node latency
-- Storage: gp3 EBS volumes (default 8 GB), sufficient for logs and temporary data
--->
+**Table 4: Software stack versions.**
 
-### 5.2 Workload Description
-
-<!--
-- Three workload patterns defined in detail:
-  - Steady-state: 20 RPS per function (60 RPS total), 10-minute duration
-  - Bursty: alternating low (5 RPS) and high (50 RPS) phases, 30s each, 10-minute total
-  - Gradual ramp: linear increase from 5 to 60 RPS over 10 minutes
-- Request payloads:
-  - image-resize: {"width": 1920, "height": 1080} (standard HD)
-  - db-query: {"key": "user:<random_id>"} (uniform random keys)
-  - log-filter: empty body (function generates synthetic logs internally)
-- Why these patterns: steady tests baseline behavior, bursty tests adaptation speed, ramp tests scaling limits
--->
-
-### 5.3 Baselines
-
-<!--
-- Baseline A — Non-OC Only: all requests go to Non-OC instances
-  - Expected: best latency, highest cost, zero SLO violations
-  - Purpose: establishes the latency SLO threshold and the cost ceiling
-  
-- Baseline B — OC Only: all requests go to OC instances
-  - Expected: worst latency under load, lowest cost, highest SLO violations
-  - Purpose: shows the cost floor and the latency penalty of blind overcommitment
-  
-- Baseline C — Random 50/50: each request randomly routed to OC or Non-OC with equal probability
-  - Expected: middling performance — demonstrates that ML adds value over randomness
-  - Purpose: controls for the "half the requests go to safe instances" effect
-  
-- Baseline D — Golgi (our system): ML-guided routing with vertical scaling
-  - Expected: near Non-OC latency with near OC cost
-  - Purpose: demonstrates the paper's core claim
--->
-
-### 5.4 Metrics Measured
-
-<!--
-- Latency: P50, P95, P99 end-to-end (measured at load generator)
-- SLO violation rate: % of requests exceeding the SLO threshold (P95 of Non-OC baseline)
-- Memory cost: sum of (allocated_memory_MB × active_seconds) across all function containers
-- CPU cost: sum of (allocated_cpu_millicores × active_seconds) across all function containers
-- Throughput: successful requests per second
-- Cold start count: number of container scale-up events during experiment
-- Routing decisions: % of requests sent to OC vs Non-OC over time
-- ML model accuracy: classification accuracy, precision, recall measured on held-out data
--->
-
-### 5.5 SLO Definition
-
-We define the SLO threshold for each function as the P95 latency of its Non-OC variant under zero concurrent load, matching the paper's methodology (Section 5.1). We deploy the Non-OC function, send 200 sequential requests with no concurrent load, and record all latencies. A request "violates" the SLO if its latency exceeds this threshold.
-
-The measured SLO thresholds from our baseline (Phase 1, 200 requests per function):
-
-| Function | Profile | SLO Threshold (Non-OC P95) |
+| Component | Version | Notes |
 |---|---|---|
-| image-resize | CPU-bound | 4591 ms |
-| db-query | I/O-bound | 21 ms |
-| log-filter | Mixed | 17 ms |
+| OS | Amazon Linux 2023 | Kernel 6.1.166 |
+| k3s | v1.34.6+k3s1 | Containerd 2.2.2 |
+| OpenFaaS | Helm revision 1 | Gateway on NodePort 31112 |
+| Python | 3.9.25 | On all nodes |
+| Go | (built into log-filter image) | golang-http template |
+| cgroup | v2 (unified) | `/sys/fs/cgroup/` |
+| faas-cli | v0.18.8 | Function build and deploy |
 
-The full baseline latency distributions are shown below. Figure 1 shows CDF curves for the fast functions (db-query and log-filter), with the SLO threshold marked for each. Figure 2 shows per-function CDF comparisons of Non-OC vs OC variants with the SLO violation region shaded.
+All instances are in the same subnet (`10.0.1.0/24`) and availability zone (`us-east-1a`), giving sub-millisecond inter-node latency. This eliminates cross-AZ network jitter as a confound in our measurements.
+
+### 5.2 Methodology
+
+For each of the six function variants, we send 200 sequential HTTP POST requests (concurrency = 1) through the OpenFaaS gateway from the load generator node. Before measurement, each function is warmed with 5 invocations to ensure no cold starts appear in the data. Per-request round-trip latency is recorded by `curl` on the load generator.
+
+We define the SLO threshold for each function as the P95 latency of its Non-OC variant under this sequential, no-contention workload, matching the methodology described in Section 5.1 of the Golgi paper. A request "violates" the SLO if its latency exceeds this threshold.
+
+### 5.3 Baseline Results
+
+**Table 5: Baseline latency measurements (200 sequential requests per variant, measured 2026-04-12).**
+
+| Function | Profile | CPU | P50 | P95 (SLO) | P99 | Mean | Errors |
+|---|---|---|---|---|---|---|---|
+| image-resize | CPU-bound (Non-OC) | 1000m | 4485 ms | **4591 ms** | 4762 ms | 4499 ms | 0/200 |
+| image-resize-oc | CPU-bound (OC) | 405m | 11067 ms | 11156 ms | 11276 ms | 11057 ms | 0/200 |
+| db-query | I/O-bound (Non-OC) | 500m | 18 ms | **21 ms** | 24 ms | 19 ms | 0/200 |
+| db-query-oc | I/O-bound (OC) | 185m | 20 ms | 28 ms | 35 ms | 21 ms | 0/200 |
+| log-filter | Mixed (Non-OC) | 500m | 16 ms | **17 ms** | 18 ms | 16 ms | 0/200 |
+| log-filter-oc | Mixed (OC) | 206m | 25 ms | 77 ms | 96 ms | 35 ms | 0/200 |
+
+The SLO thresholds (bolded P95 values) are: 4591 ms for image-resize, 21 ms for db-query, and 17 ms for log-filter.
+
+### 5.4 Degradation Analysis
+
+The baseline results already reveal a profile-dependent degradation pattern consistent with the CFS quota enforcement mechanism:
+
+**CPU-bound (image-resize): near-proportional degradation at this OC level.** The OC variant's P95 (11156 ms) is 2.43× the Non-OC P95 (4591 ms). The CPU reduction factor is 2.47× (1000m → 405m). The degradation ratio (2.43×) closely matches the CPU reduction ratio (2.47×), indicating that at this overcommitment level, image-resize latency scales proportionally with available CPU. The latency distribution is tight — P99/P50 ratio is 1.06 for Non-OC and 1.02 for OC — indicating consistent, predictable behavior with no CFS boundary effects. Whether this linear relationship holds across all CPU levels is tested in Phase 2; the literature suggests CFS throttling artifacts may introduce superlinear degradation at extreme overcommitment levels.
+
+**I/O-bound (db-query): resilient to overcommitment.** The OC variant's P95 (28 ms) is only 1.33× the Non-OC P95 (21 ms), despite a 2.70× CPU reduction (500m → 185m). The function absorbs nearly three-quarters of the CPU cut with minimal latency impact because network round-trips to Redis dominate execution time, not CPU computation. This is consistent with the expectation that I/O-bound functions tolerate aggressive overcommitment, since their bottleneck is network latency rather than CPU cycles.
+
+**Mixed (log-filter): disproportionate, non-linear degradation.** The OC variant's P95 (77 ms) is 4.53× the Non-OC P95 (17 ms), despite only a 2.43× CPU reduction (500m → 206m). The degradation is nearly double what proportional scaling would predict. More telling is the distribution shape: the Non-OC variant is tight (P99/P50 = 1.13), while the OC variant shows extreme spread (P99/P50 = 3.84). The OC median (25 ms) is only 1.56× the Non-OC median (16 ms), but the tail explodes. This is the signature of bimodal CFS throttling: most invocations complete within a single CFS period (fast mode), but a fraction spill into the next period and incur a full throttling penalty (slow mode).
+
+**Table 6: Degradation summary.**
+
+| Function | CPU Reduction | P95 Degradation | Proportional? |
+|---|---|---|---|
+| image-resize | 2.47× | 2.43× | Yes — degradation matches CPU cut |
+| db-query | 2.70× | 1.33× | No — resilient (I/O-dominated) |
+| log-filter | 2.43× | 4.53× | No — disproportionate (CFS throttling) |
+
+### 5.5 Baseline Figures
+
+Figure 1 shows CDF curves for the fast functions (db-query and log-filter), with the SLO threshold marked for each. The separation between Non-OC and OC curves is small for db-query but dramatic for log-filter, with the OC curve developing a long tail.
 
 <p align="center">
   <img src="../results/phase1/plots/fig1_cdf_fast_functions.png" width="72%" />
 </p>
 
 *Figure 1: Latency CDF for I/O-bound and mixed functions. Solid lines are Non-OC, dashed lines are OC. Vertical dotted lines mark the SLO threshold.*
+
+Figure 2 shows per-function CDF comparisons of Non-OC vs OC variants with the SLO violation region shaded.
 
 <p align="center">
   <img src="../results/phase1/plots/fig2_cdf_per_function.png" width="65%" />
@@ -478,242 +385,225 @@ Figure 3 compares P95 latency across all functions, separated into CPU-bound and
   <img src="../results/phase1/plots/fig3_p95_bar_chart.png" width="80%" />
 </p>
 
-*Figure 3: P95 latency comparison. Degradation ratios show that CPU-bound functions degrade proportionally to CPU reduction (2.4x), I/O-bound functions are resilient (1.3x), and mixed functions suffer disproportionately (4.5x) from CFS throttling.*
+*Figure 3: P95 latency comparison. CPU-bound functions degrade proportionally to CPU reduction (2.4×), I/O-bound functions are resilient (1.3×), and mixed functions suffer disproportionately (4.5×) from CFS throttling.*
 
-Figure 4 shows the latency distributions as box plots, revealing the bimodal behavior of the mixed function under overcommitment.
+Figure 4 shows the latency distributions as box plots, revealing the spread difference between profiles under overcommitment.
 
 <p align="center">
   <img src="../results/phase1/plots/fig4_box_plots.png" width="65%" />
 </p>
 
-*Figure 4: Box plots showing distribution shape. The log-filter OC variant exhibits wide spread from bimodal CFS behavior.*
+*Figure 4: Box plots showing distribution shape. The log-filter OC variant exhibits wide spread from bimodal CFS behavior, while image-resize and db-query maintain tight distributions.*
 
-Figure 5 summarizes the degradation ratios alongside CPU reduction ratios, visualizing the core hypothesis that different function profiles respond differently to overcommitment.
+Figure 5 summarizes the degradation ratios alongside CPU reduction ratios, visualizing the core finding that different function profiles respond differently to overcommitment.
 
 <p align="center">
   <img src="../results/phase1/plots/fig5_degradation_ratios.png" width="72%" />
 </p>
 
-*Figure 5: Degradation ratio comparison. CPU-bound degradation matches CPU reduction (2.4x ≈ 2.5x). I/O-bound functions absorb a 2.7x CPU cut with only 1.3x degradation. Mixed functions show disproportionate degradation from CFS quota boundary effects.*
+*Figure 5: Degradation ratio comparison. CPU-bound degradation matches CPU reduction (2.4× ≈ 2.5×). I/O-bound functions absorb a 2.7× CPU cut with only 1.3× degradation. Mixed functions show disproportionate degradation from CFS quota boundary effects.*
 
-### 5.6 Repeatability
+### 5.6 Implications for Subsequent Experiments
 
-<!--
-- Each experiment configuration run 3 times
-- Results reported as mean ± standard deviation across runs
-- Between runs: restart all function pods (fresh containers), clear ML model state
-- Warm-up: first 60 seconds of each run discarded from measurement
-- Total experiment time: 4 baselines × 3 workloads × 3 runs × 10 min = 6 hours of experiments
-- All raw data (latency logs, metric snapshots, routing decisions) saved for post-hoc analysis
--->
+These baseline results establish that profile-dependent degradation exists at a single overcommitment level with zero concurrent load. The four main experiments (Phases 2–5) will characterize whether this pattern holds across multiple overcommitment levels, under concurrent load, at extreme tail percentiles, and whether the CFS quota boundary mechanism can be confirmed as the causal driver of the mixed-function behavior.
 
 ---
 
 ## 6. Results and Analysis
 
-<!-- Pages 10–12, ~2000 words -->
+<!-- Sections 6.1–6.4 correspond to the four main experiments (Phases 2–5). To be written as each experiment completes. -->
 
-### 6.1 Overall Cost Reduction
+### 6.1 Multi-Level Degradation Curves (RQ1)
 
 <!--
-- Bar chart: memory cost (MB-seconds) for each baseline across all functions
-- Table: % cost reduction of Golgi vs Non-OC Only
-- Expected: 25-35% reduction (paper achieved 42%)
-- Analysis: where does the savings come from? (proportion of requests successfully routed to OC)
-- Breakdown by function: which function benefits most from overcommitment?
+- Phase 2 results: 5 CPU levels × 3 functions, 200 requests each
+- Plot: P95 latency vs CPU allocation (% of Non-OC), one line per function profile
+- Expected shapes:
+  - image-resize: linear or near-linear (CPU-bound, direct proportionality)
+  - db-query: flat curve (I/O-bound, resilient to CPU reduction)
+  - log-filter: non-linear with a knee (mixed, CFS boundary crossing at some CPU level)
+- Table: P95 latency at each level for each function
+- Analysis: at what CPU level does each profile start degrading significantly?
+- Actionable insight: safe overcommitment thresholds per profile
 -->
 
-### 6.2 Latency Distribution
+### 6.2 Concurrency Under Overcommitment (RQ2)
 
 <!--
-- CDF plots: one per function, all 4 baselines overlaid
-- Highlight P95 threshold (SLO line) on each plot
-- Key observations:
-  - Non-OC: tight distribution, well below SLO
-  - OC Only: long tail extending past SLO
-  - Random: bimodal (mix of OC and Non-OC latencies)
-  - Golgi: similar to Non-OC for most requests, small tail from OC misrouting
--->
-
-### 6.3 SLO Violation Rate
-
-<!--
-- Time-series: violation rate (10-second rolling window) over experiment duration
-- Table: final violation rates per function per baseline
+- Phase 3 results: 4 concurrency levels × 6 function variants
+- Plot: P95 latency vs concurrency, Non-OC and OC lines per function
+- Key question: are the lines parallel (additive) or diverging (superlinear)?
 - Expected:
-  - Non-OC: 0% (by definition, since SLO is set from this baseline)
-  - OC Only: 15-30%
-  - Random: 8-15%
-  - Golgi: <10% (our target)
-- Analysis: when do violations cluster? (during burst phases? at ramp peak?)
+  - image-resize: near-parallel (CPU contention adds linearly)
+  - db-query: near-parallel (I/O wait dominates, concurrency adds queueing)
+  - log-filter: diverging (CFS throttling + concurrency compound)
+- Table: degradation ratio at each concurrency level
+- Analysis: does concurrent load change which profiles are safe to overcommit?
 -->
 
-### 6.4 Classifier Performance
+### 6.3 Tail Latency Analysis (RQ3)
 
 <!--
-- Accuracy, precision, recall, F1 score
-- Confusion matrix: TP (correctly predicted violation), FP (predicted violation but was fine), FN (missed violation), TN
-- FP rate matters: too many false positives → unnecessary Non-OC routing → reduced cost savings
-- FN rate matters: missed violations → SLO breaches
-- Feature importance: bar chart ranking 7 metrics by Random Forest importance score
-- Expected: CPU utilization and inflight_requests will be most predictive
-- Discussion: does the model improve over time as more training data arrives?
+- Phase 4 results: P50, P95, P99, P99.9 across all configurations
+- Plot: tail latency amplification factor (P99/P50, P99.9/P50) per profile under OC
+- Key question: does overcommitment amplify tail latency disproportionately?
+- Expected:
+  - CPU-bound: uniform amplification (all percentiles scale similarly)
+  - I/O-bound: minimal amplification (tail stays tight)
+  - Mixed: disproportionate amplification (P99.9 >> P50 under OC)
+- Analysis: implications for SLO design — P95 vs P99 as the right threshold
 -->
 
-### 6.5 Vertical Scaling Effectiveness
+### 6.4 CFS Quota Boundary Analysis (RQ4)
 
 <!--
-- Compare: Golgi without vertical scaling vs Golgi with vertical scaling
-- Show: violation rate time-series for both
-- Show: max_inflight trajectory over time (how it adapts)
-- Expected: vertical scaling reduces violation rate by 2-5 percentage points
-- Analysis: how quickly does it react? (latency of the AIMD control loop)
+- Phase 5 results: log-filter at fine-grained CPU levels (50m steps from 100m to 500m)
+- Plot: latency distribution (histogram or violin) at each CPU level
+- Key question: does the bimodal distribution appear/disappear predictably?
+- Expected:
+  - High CPU (>350m): unimodal, fast (burst fits in one CFS period)
+  - Medium CPU (~200-300m): bimodal (burst sometimes spills into next period)
+  - Low CPU (<150m): unimodal, slow (burst always requires multiple periods)
+- Analysis: identify the exact CFS boundary crossing point
+- Mechanistic explanation: relate burst size (µs) to quota (µs) to period (100ms)
 -->
 
-### 6.6 Impact of Workload Pattern
+### 6.5 Summary of Findings
 
 <!--
-- Compare results across steady, bursty, ramp workloads
-- Which pattern is hardest for the ML model? (likely bursty — sudden transitions)
-- Which pattern shows most cost savings? (likely steady — stable predictions)
-- Discussion: the trade-off between prediction confidence and routing aggressiveness
--->
-
-### 6.7 Comparison with Paper's Results
-
-<!--
-- Side-by-side table: paper's numbers vs our numbers for each metric
-- Expected gaps and explanations:
-  - Lower cost savings: fewer functions (less opportunity for statistical multiplexing)
-  - Higher violation rate: Random Forest vs Mondrian Forest (no online adaptation)
-  - Different absolute latencies: t3.xlarge (4 vCPU) vs c5.9xlarge (36 vCPU)
-- What we can and cannot conclude from the comparison
+- Synthesis table: which aspects of the Golgi hypothesis are validated/nuanced/contradicted
+- Overall conclusion: does the empirical evidence support profile-aware overcommitment?
+- Implications for system design: what would a scheduler need to know about each profile?
 -->
 
 ---
 
 ## 7. Discussion
 
-<!-- Pages 12–13, ~1400 words -->
+<!-- To be written after all experiments complete. -->
 
 ### 7.1 Key Findings
 
 <!--
-- Finding 1: ML-guided routing does reduce cost while maintaining SLOs (validates paper's core claim)
-- Finding 2: [which metric is most predictive — likely CPU util or inflight requests]
-- Finding 3: Vertical scaling provides meaningful safety net (X% violation reduction)
-- Finding 4: The system works even with a simpler ML model (Random Forest vs Mondrian Forest)
-- Finding 5: [any surprising result or unexpected behavior]
+- Finding 1: The Golgi hypothesis holds — different profiles respond differently to overcommitment (validated)
+- Finding 2: CPU-bound degradation is proportional and predictable (linear curve)
+- Finding 3: I/O-bound functions tolerate aggressive overcommitment (flat curve down to X% CPU)
+- Finding 4: Mixed-function degradation is driven by CFS quota boundary effects (mechanistic validation)
+- Finding 5: Concurrent load amplifies degradation superlinearly for mixed functions (system design implication)
+- Finding 6: Tail latency amplification is profile-dependent (P99.9 behavior differs from P95)
 -->
 
-### 7.2 Limitations of Our Replication
+### 7.2 Implications for Overcommitment-Aware Schedulers
 
 <!--
-- Smaller cluster (3 workers vs 7): less resource contention diversity, fewer scheduling options
-- Fewer functions (3 vs 8): less statistical multiplexing, simpler interaction patterns
-- Random Forest vs Mondrian Forest: no online learning, 5-minute staleness window
-- t3.xlarge vs c5.9xlarge: burstable instances have CPU credits — may affect contention patterns differently
-- Simplified workload: synthetic traces lack the autocorrelation and diurnal patterns of real Azure traces
-- Single AZ: no cross-AZ latency considerations
-- No hardware perf counters: skipped LLC cache miss rate and memory bandwidth (2 of 9 metrics)
+- What our characterization data tells scheduler designers:
+  - I/O-bound functions are safe to overcommit aggressively (up to X× CPU reduction)
+  - CPU-bound functions require proportional resource guarantees (degradation is predictable)
+  - Mixed functions need special treatment — CFS boundary awareness is essential
+- How Golgi's design aligns with our findings:
+  - The two-instance model is well-motivated: profiles genuinely respond differently
+  - An ML classifier needs to distinguish profiles, not just predict violations
+  - The CFS explanation justifies fine-grained CPU limit control, not just binary OC/Non-OC
 -->
 
-### 7.3 Threats to Validity
+### 7.3 Limitations
+
+<!--
+- Smaller cluster (3 workers vs paper's 7): less co-location diversity
+- Fewer functions (3 vs 8): one function per profile — no within-profile variance
+- t3.xlarge (burstable): CPU credits may mask throttling during short experiments
+- Synthetic functions: designed to be pure examples of each profile — real functions are messier
+- Sequential measurement: Phases 1-2 use concurrency=1, which understates real-world contention
+- Single overcommitment formula: we use Golgi's α=0.3 formula, not exploring other formulas
+-->
+
+### 7.4 Threats to Validity
 
 <!--
 - Internal validity:
-  - Implementation bugs in metric collection (timing issues, cgroup path discovery)
-  - Measurement noise (network jitter, EBS latency spikes, t3 CPU throttling)
-  - Model training instability (random seed sensitivity)
+  - Measurement noise: network jitter, EBS latency spikes, t3 CPU credit throttling
+  - Warm-up adequacy: 5 warmup requests may not fully stabilize JIT, caches, etc.
+  - Sample size: 200 requests per configuration — sufficient for P95/P99 but marginal for P99.9
   
 - External validity:
-  - Different hardware (t3 vs c5 — different CPU microarchitecture, memory bandwidth)
-  - Different Kubernetes version (k3s v1.34 vs likely K8s 1.24-1.26 in paper)
-  - Different OS (Amazon Linux 2023 / cgroup v2 vs likely Ubuntu / cgroup v1)
-  - Different OpenFaaS version
+  - Different hardware from paper (t3 vs c5 — different CPU microarchitecture, memory bandwidth)
+  - cgroup v2 vs paper's likely cgroup v1 (different throttling behavior possible)
+  - k3s v1.34 vs paper's likely K8s 1.24-1.26 (scheduler differences)
+  - Amazon Linux 2023 vs paper's likely Ubuntu (kernel configuration differences)
   
 - Construct validity:
-  - Our SLO definition matches the paper's methodology, but absolute latency values differ
-  - Our "cost" metric (MB-seconds) may not perfectly reflect real billing
-  - Our simplified functions may not exhibit the same resource patterns as the paper's real-world functions
+  - SLO thresholds are infrastructure-specific — absolute values differ from paper
+  - Our benchmark functions are purpose-built; real-world functions may show hybrid profiles
+  - "Mixed" is a broad category — different types of mixed workloads may behave differently
 -->
 
-### 7.4 Lessons Learned
+### 7.5 Lessons Learned
 
 <!--
-- cgroup v2 vs v1: different file paths, unified hierarchy simplifies some things but documentation is sparse
-- k3s quirks: KUBECONFIG not set by default for Helm, svclb instead of MetalLB, traefik conflicts
-- OpenFaaS scaling: need to disable auto-scaling to maintain our fixed OC/Non-OC instances
-- ML model cold start: system is blind for the first few minutes — need a safe default
-- Monitoring overhead: 500ms metric collection adds measurable CPU usage on workers
-- Container discovery: matching K8s pod → containerd container → cgroup path is fragile
+- cgroup v2 vs v1: unified hierarchy simplifies cgroup management, but documentation is sparse
+- k3s operational quirks: KUBECONFIG not set by default for Helm, svclb conflicts, traefik disabling
+- OpenFaaS scaling: must explicitly disable auto-scaling to fix replica counts for controlled experiments
+- CFS period visibility: throttle counts in cpu.stat are essential for understanding bimodal behavior
+- t3 burstable instances: CPU credit monitoring needed to ensure experiments run at full capacity
 -->
 
-### 7.5 Potential Improvements
+### 7.6 Future Work
 
 <!--
-- Online learning: implement Mondrian Forest for true online adaptation (no retraining delay)
-- More functions: add GPU-bound (inference), memory-bound (in-memory sort), and chained functions
-- Larger cluster: more workers would enable better statistical multiplexing
-- Real traces: replay actual Azure Function Trace with realistic arrival patterns
-- Multi-model: different classifiers per function (specialized vs general)
-- Cost-aware routing: factor in instance cost explicitly, not just violation probability
-- Horizontal scaling integration: combine with OpenFaaS auto-scaler for dynamic replica count
+- More functions per profile: multiple CPU-bound, I/O-bound, and mixed functions to test within-profile variance
+- Multi-node contention: co-locate OC functions on same worker to measure cross-function interference
+- Memory overcommitment: this study focuses on CPU — memory overcommitment has different dynamics
+- Real-world functions: test with production-like functions (ML inference, web scraping, ETL pipelines)
+- Longer experiments: sustained load to exhaust t3 CPU credits and observe steady-state behavior
+- Dynamic overcommitment: vary CPU limits at runtime and measure adaptation latency
 -->
 
 ---
 
 ## 8. Conclusion
 
-<!-- Page 14, ~700 words -->
+<!-- To be written after all experiments complete. -->
 
 <!--
-Paragraph 1: Restate the problem and Golgi's solution (2-3 sentences)
-Paragraph 2: What we built — end-to-end system on AWS with k3s, OpenFaaS, 3 functions, ML classifier, router, vertical scaling
-Paragraph 3: Key quantitative results:
-  - Achieved X% memory cost reduction (vs paper's 42%)
-  - Maintained <Y% SLO violation rate (vs paper's <5%)
-  - Vertical scaling reduced violations by Z percentage points
-Paragraph 4: Which paper claims are validated:
-  - Claim 1 (cost reduction via ML routing): validated / partially validated
-  - Claim 2 (SLO maintenance): validated / partially validated
-  - Claim 3 (vertical scaling as safety net): validated
-Paragraph 5: Broader significance:
-  - ML-guided resource management is practical for serverless platforms
-  - The two-instance model is a sound architectural pattern
-  - Even simplified implementations achieve meaningful savings
-Paragraph 6: Future work (1-2 sentences pointing to Section 7.5)
+Paragraph 1: Restate the problem — serverless resource waste, overcommitment as the fix, but blind overcommitment causes latency degradation (2-3 sentences)
+Paragraph 2: The Golgi hypothesis — profile-dependent degradation is assumed but not independently validated (2 sentences)
+Paragraph 3: What we did — systematic empirical characterization across 3 profiles, 4 experiments, on real AWS infrastructure (2-3 sentences)
+Paragraph 4: Key quantitative findings:
+  - CPU-bound: degradation proportional to CPU reduction (2.4× at Golgi's OC level)
+  - I/O-bound: resilient — only 1.3× degradation despite 2.7× CPU cut
+  - Mixed: disproportionate 4.5× degradation from CFS quota boundary effects
+  - [Degradation curve shapes from Phase 2]
+  - [Concurrency amplification results from Phase 3]
+  - [CFS boundary validation from Phase 5]
+Paragraph 5: What this means for overcommitment-aware schedulers:
+  - The hypothesis is validated — profiles genuinely require different treatment
+  - I/O-bound functions are safe targets for aggressive overcommitment
+  - Mixed functions need CFS-aware resource allocation, not just reduced CPU
+  - Characterization data like ours is a prerequisite for designing safe overcommitment policies
+Paragraph 6: Future work (1-2 sentences pointing to Section 7.6)
 -->
 
 ---
 
 ## 9. References
 
-<!-- Page 15 -->
-
 1. Li, S., Wang, W., Yang, J., Chen, G., & Lu, D. (2023). Golgi: Performance-Aware, Resource-Efficient Function Scheduling for Serverless Computing. *Proceedings of the ACM Symposium on Cloud Computing (SoCC '23)*. https://doi.org/10.1145/3620678.3624645
 
 2. Shahrad, M., Fung, R., Gruber, N., Goiri, I., Chaudhry, G., Cooke, J., Laureano, E., Tresness, C., Russinovich, M., & Bianchini, R. (2020). Serverless in the Wild: Characterizing and Optimizing the Serverless Workload at a Large Cloud Provider. *USENIX ATC '20*. https://www.usenix.org/conference/atc20/presentation/shahrad
 
-3. Lakshminarayanan, B., Roy, D. M., & Teh, Y. W. (2014). Mondrian Forests: Efficient Online Random Forests. *Advances in Neural Information Processing Systems (NeurIPS) 27*. https://arxiv.org/abs/1406.2673
+3. Ambati, P., Goiri, I., Frujeri, F., Gun, A., Wang, K., Dolan, B., Corell, B., Pasupuleti, S., Moscibroda, T., Elnikety, S., Fontoura, M., & Bianchini, R. (2020). Providing SLOs for Resource-Harvesting VMs in Cloud Platforms. *14th USENIX Symposium on Operating Systems Design and Implementation (OSDI '20)*. https://www.usenix.org/conference/osdi20/presentation/ambati
 
-4. Ambati, P., Goiri, I., Frujeri, F., Gun, A., Wang, K., Dolan, B., Corell, B., Pasupuleti, S., Moscibroda, T., Elnikety, S., Fontoura, M., & Bianchini, R. (2020). Providing SLOs for Resource-Harvesting VMs in Cloud Platforms. *14th USENIX Symposium on Operating Systems Design and Implementation (OSDI '20)*. https://www.usenix.org/conference/osdi20/presentation/ambati
+4. Wen, J., Chen, Z., Jin, Y., & Liu, H. (2021). Kraken: Adaptive Container Provisioning for Deploying Dynamic DAGs in Serverless Platforms. *ACM SoCC '21*. https://doi.org/10.1145/3472883.3486992
 
-5. Wen, J., Chen, Z., Jin, Y., & Liu, H. (2021). Kraken: Adaptive Container Provisioning for Deploying Dynamic DAGs in Serverless Platforms. *ACM SoCC '21*. https://doi.org/10.1145/3472883.3486992
+5. Suresh, A., Somashekar, G., Varadarajan, A., Kakarla, V.R., & Gandhi, A. (2020). ENSURE: Efficient Scheduling and Autonomous Resource Management in Serverless Environments. *IEEE ACSOS 2020*. https://doi.org/10.1109/ACSOS49614.2020.00036
 
-6. Suresh, A., Somashekar, G., Varadarajan, A., Kakarla, V.R., Upadhyay, H.R., & Gandhi, A. (2020). ENSURE: Efficient Scheduling and Autonomous Resource Management in Serverless Environments. *IEEE ACSOS 2020*. https://doi.org/10.1109/ACSOS49614.2020.00036
+6. Linux Kernel CFS Bandwidth Control Documentation. https://docs.kernel.org/scheduler/sched-bwc.html
 
-7. k3s — Lightweight Kubernetes. https://k3s.io/
+7. Linux Kernel cgroup v2 Documentation. https://docs.kernel.org/admin-guide/cgroup-v2.html
 
-8. OpenFaaS — Serverless Functions Made Simple. https://www.openfaas.com/
+8. k3s — Lightweight Kubernetes. https://k3s.io/
 
-9. Locust — An Open Source Load Testing Tool. https://locust.io/
-
-10. Azure Functions Trace 2019. https://github.com/Azure/AzurePublicDataset
-
-11. Pedregosa, F., Varoquaux, G., Gramfort, A., Michel, V., Thirion, B., Grisel, O., Blondel, M., Prettenhofer, P., Weiss, R., Dubourg, V., Vanderplas, J., Passos, A., Cournapeau, D., Brucher, M., Perrot, M., & Duchesnay, E. (2011). Scikit-learn: Machine Learning in Python. *Journal of Machine Learning Research, 12*, 2825–2830. https://jmlr.org/papers/v12/pedregosa11a.html
-
-12. Linux Kernel cgroup v2 Documentation. https://docs.kernel.org/admin-guide/cgroup-v2.html
+9. OpenFaaS — Serverless Functions Made Simple. https://www.openfaas.com/
 
 ---
 
@@ -725,7 +615,7 @@ Paragraph 6: Future work (1-2 sentences pointing to Section 7.5)
 
 ## Appendix B: Reproducibility Commands
 
-<!-- Key CLI commands for someone replicating our replication -->
+<!-- Key CLI commands for reproducing our experiments -->
 
 ---
 

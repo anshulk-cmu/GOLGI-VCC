@@ -50,7 +50,7 @@ The Golgi paper (Li et al., SoCC 2023) proposes a profile-aware scheduling syste
 
 The Golgi paper uses this hypothesis as the motivation for building an ML-guided routing system, but their evaluation focuses on end-to-end system performance. The hypothesis itself — that overcommitment impact is profile-dependent and predictable — is assumed, not independently validated.
 
-**We provide that validation.** This project is a systematic empirical characterization of how resource overcommitment affects serverless function latency across three workload profiles (CPU-bound, I/O-bound, mixed), conducted on real cloud infrastructure. We go beyond a single-point comparison to produce degradation curves across multiple overcommitment levels, analyze contention effects under concurrent load, examine tail latency amplification, and provide a mechanistic explanation of CFS quota boundary effects on mixed workloads.
+**We provide that characterization.** This project is a systematic empirical study of how Linux CFS quota enforcement creates profile-dependent latency degradation under container resource overcommitment. We measure this across three workload profiles (CPU-bound, I/O-bound, mixed) on real cloud infrastructure, going beyond a single-point comparison to produce degradation curves across multiple overcommitment levels, analyze contention effects under concurrent load, examine tail latency amplification, and provide a mechanistic explanation of CFS quota boundary effects on mixed workloads.
 
 ### 1.3 Research Questions
 
@@ -67,7 +67,7 @@ The Golgi paper uses this hypothesis as the motivation for building an ML-guided
 2. **Contention analysis** demonstrating how concurrent load interacts with overcommitment, revealing superlinear degradation for mixed workloads
 3. **Tail latency characterization** showing that overcommitment amplifies tail latency disproportionately for profiles near CFS quota boundaries
 4. **Mechanistic explanation** of bimodal CFS throttling behavior in mixed workloads, validated experimentally by manipulating the quota boundary
-5. **Independent validation** of the Golgi paper's foundational hypothesis that different function profiles require different overcommitment treatment — the insight that motivates profile-aware scheduling
+5. **Empirical characterization** of the profile-dependent degradation phenomenon that motivates profile-aware scheduling systems like Golgi — grounded in direct measurement on real infrastructure
 
 ### 1.5 Technology Stack
 
@@ -249,7 +249,7 @@ For context, the Golgi system maintains two sets of container replicas per funct
 
 An ML classifier predicts whether an OC instance can handle a request without violating the latency SLO, and a router directs traffic accordingly. The result: ~42% memory cost reduction while maintaining P95 latency SLOs.
 
-Our study validates the foundational observation that makes this system design sensible — that overcommitment impact varies predictably by workload profile. If all functions degraded identically under overcommitment, there would be no reason to build a profile-aware scheduler. Our data shows they do not degrade identically, and the differences are both large and mechanistically explainable.
+Our study characterizes the foundational observation that makes this system design sensible — that overcommitment impact varies predictably by workload profile. If all functions degraded identically under overcommitment, there would be no reason to build a profile-aware scheduler. Our data shows they do not degrade identically, and the differences are both large and mechanistically explainable.
 
 ---
 
@@ -972,7 +972,7 @@ SLO_log_filter   = 17 ms
 
 4. **Zero errors across all 1,200 requests** confirms infrastructure stability.
 
-These baseline results validate the Golgi hypothesis at a single overcommitment level. Phases 2-5 extend this to multiple levels and deeper analysis.
+These baseline results demonstrate profile-dependent degradation behavior at a single overcommitment level, consistent with the CFS-driven mechanism. Phases 2-5 extend this to multiple levels and deeper analysis.
 
 ### 6.6 Phase 1 Plots
 
@@ -1572,7 +1572,7 @@ The key figure should show:
 2. At transition CPU (220-180m): bimodal distribution with peaks at ~16ms and ~80-100ms
 3. At low CPU (140-100m): unimodal distribution centered at ~80-100ms (or higher for very low CPU)
 
-The transition CPU level should correspond to where the CFS quota equals the function's CPU burst size (~16ms of CPU work). This directly validates the CFS boundary hypothesis.
+The transition CPU level should correspond to where the CFS quota equals the function's CPU burst size (~16ms of CPU work). This directly tests the CFS boundary hypothesis and provides a mechanistic explanation for the bimodal degradation pattern.
 
 ### 10.7 Plots to Generate
 
@@ -1673,14 +1673,14 @@ For each research question, compute:
 - Transition point estimate: CPU level where bimodality first appears
 - Correlation between throttle ratio and slow-mode fraction
 
-### 11.3 Comparison with Golgi Paper Claims
+### 11.3 Comparison with Golgi Paper's Assumed Behavior
 
-| Golgi Claim | Our Evidence | Verdict |
+| Assumed Behavior | Our Evidence | Finding |
 |---|---|---|
-| CPU-bound functions degrade proportionally to CPU cut | Phase 2 degradation curve slope | Validated / Not validated |
-| I/O-bound functions are resilient to overcommitment | Phase 2 flat curve for db-query | Validated / Not validated |
-| Mixed functions show variable degradation | Phase 2 + Phase 5 CFS analysis | Validated + mechanistic explanation |
-| Different profiles need different overcommitment treatment | All phases | Core hypothesis validated |
+| CPU-bound functions degrade proportionally to CPU cut | Phase 2 degradation curve slope | Confirmed / Nuanced / Contradicted |
+| I/O-bound functions are resilient to overcommitment | Phase 2 flat curve for db-query | Confirmed / Nuanced / Contradicted |
+| Mixed functions show variable degradation | Phase 2 + Phase 5 CFS analysis | Characterized + mechanistic explanation |
+| Different profiles need different overcommitment treatment | All phases | Characterized with degradation curves |
 
 ### 11.4 Checkpoint: Phase 6 Complete
 
@@ -1719,7 +1719,7 @@ For each research question, compute:
 
 | # | Paper | Relevance |
 |---|---|---|
-| 1 | Golgi (Li et al., SoCC 2023) | Foundational hypothesis we validate |
+| 1 | Golgi (Li et al., SoCC 2023) | Profile-dependent degradation hypothesis we characterize |
 | 2 | Azure Function Trace (Shahrad et al., ATC 2020) | Workload characterization, resource waste numbers |
 | 3 | Mondrian Forest (Lakshminarayanan et al., NeurIPS 2014) | ML model in Golgi (background) |
 | 4 | Harvest VMs (Ambati et al., OSDI 2020) | Alternative approach to resource efficiency |
@@ -2073,7 +2073,7 @@ at which log-filter latency becomes bimodal (D crosses the threshold).
 
 **Total measurement effort remaining:** ~34,800 requests across Phases 2-5
 **Estimated time remaining:** ~2-3 weeks
-**Target:** Validate (or refute) the Golgi hypothesis that overcommitment impact is profile-dependent and mechanistically explainable
+**Target:** Characterize how CFS quota enforcement creates profile-dependent latency degradation under overcommitment, and determine whether the degradation patterns are mechanistically explainable
 
 ---
 

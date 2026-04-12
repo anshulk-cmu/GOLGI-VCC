@@ -1,4 +1,4 @@
-# Golgi Replication — Execution Log: Phase 1
+# Execution Log: Phase 1 — Benchmark Deployment and Baseline Characterization
 
 > **Plan document:** [`PROJECT_PLAN.md`](PROJECT_PLAN.md)
 > **Previous phase:** [`execution_log_phase0.md`](execution_log_phase0.md)
@@ -52,7 +52,7 @@ Quick reference of resources provisioned in Phase 0 that Phase 1 builds on:
 1. A Redis deployment in the `openfaas-fn` namespace (Step 1.1)
 2. Three function implementations: `image-resize` (CPU-bound), `db-query` (I/O-bound), `log-filter` (mixed) (Step 1.2)
 3. Six OpenFaaS function deployments (3 Non-OC + 3 OC with reduced resources) (Step 1.3)
-4. Baseline P95 latency measurements that become the SLO thresholds for the ML classifier (Step 1.4)
+4. Baseline P95 latency measurements that establish SLO thresholds for evaluating overcommitment impact (Step 1.4)
 
 **Functions and their resource configurations:**
 
@@ -1325,7 +1325,7 @@ curl -s http://127.0.0.1:31112/function/image-resize-oc \
 {"original": "640x480", "resized": "320x240", "timestamp": 1775956167.1236227}
 ```
 
-Same result, but running with reduced resources (210Mi/405m vs 512Mi/1000m). The ~1.5s gap between timestamps shows the OC version took slightly longer due to CPU throttling — this is expected and is exactly the kind of latency difference our system will measure.
+Same result, but running with reduced resources (210Mi/405m vs 512Mi/1000m). The ~1.5s gap between timestamps shows the OC version took slightly longer due to CPU throttling — this is expected and is exactly the kind of latency difference our experiments will characterize.
 
 **Functional testing — db-query (I/O-bound):**
 ```bash
@@ -1474,18 +1474,18 @@ All resource limits match the plan exactly. Note that Kubernetes normalized `100
 
 ### Step 1.4: Baseline Latency Measurement — IN PROGRESS (2026-04-12)
 
-**What we are doing:** Measuring the steady-state P95 latency of each Non-OC function under sequential load (200 requests). These P95 values become the **SLO (Service Level Objective) thresholds** — the line that separates "acceptable performance" from "SLO violation." In later phases, the ML classifier uses these thresholds to decide whether an overcommitted function is degrading and needs migration.
+**What we are doing:** Measuring the steady-state P95 latency of each Non-OC function under sequential load (200 requests). These P95 values become the **SLO (Service Level Objective) thresholds** — the line that separates "acceptable performance" from "SLO violation." In later phases, these thresholds define the boundary for evaluating how degradation scales across overcommitment levels, concurrency, and CFS configurations.
 
 **Why Non-OC P95 specifically?**
 - **Non-OC** (non-overcommitted) functions have full resource allocations. Their latency represents the best-case performance baseline — what the function can do when it has all the CPU and memory it was requested.
 - **P95** (95th percentile) means "95% of requests complete within this latency." It captures the tail latency that affects user experience while being robust against rare outliers (unlike P99 or max, which can be skewed by a single network hiccup or GC pause).
-- The Golgi paper defines an SLO violation as: `latency > Non-OC P95`. When an OC function's latency crosses this threshold, the system should detect it and take corrective action (migrate the function to non-OC resources).
+- The Golgi paper defines an SLO violation as: `latency > Non-OC P95`. We adopt the same definition: when an OC function's latency crosses this threshold, we classify it as degraded.
 
 **Why 200 requests?**
 - With 200 samples, the P95 value is the 190th value when sorted. This gives us a stable estimate — enough samples that individual outliers don't dominate, but not so many that the measurement takes an impractical amount of time (especially for `image-resize` at ~4.5s per request).
 - The plan document specifies 200 requests per function.
 
-**We also measure OC variants** (with reduced resources) to verify that overcommitment causes measurable latency degradation — this is the fundamental assumption that the Golgi system is built on.
+**We also measure OC variants** (with reduced resources) to verify that overcommitment causes measurable latency degradation — this is the foundational hypothesis from the Golgi paper that our study tests.
 
 ---
 
@@ -1619,7 +1619,7 @@ done'
 
 3. **log-filter (10ms) vs log-filter-oc (11ms):** Nearly identical. The Go function generates 1000 log lines and applies regex filtering, which is fast enough that even the reduced CPU (206m vs 500m) doesn't cause measurable degradation at this scale.
 
-**Key takeaway:** The smoke test confirms the fundamental design assumption — CPU-bound functions (`image-resize`) are heavily impacted by overcommitment, while I/O-bound functions (`db-query`) are not. Mixed functions (`log-filter`) fall in between. This is exactly what the Golgi system exploits.
+**Key takeaway:** The smoke test confirms the Golgi paper's fundamental hypothesis — CPU-bound functions (`image-resize`) are heavily impacted by overcommitment, while I/O-bound functions (`db-query`) are not. Mixed functions (`log-filter`) fall in between. Our subsequent experiments will characterize this behavior in detail across multiple overcommitment levels.
 
 ---
 
@@ -2101,7 +2101,7 @@ P99:    11276 ms
 | Mean | 4498.7 ms | 11056.8 ms | 2.46× |
 | Max | 4765 ms | 11281 ms | 2.37× |
 
-The degradation ratio is consistently ~2.4-2.5× across all percentiles, confirming that this is pure CPU-bound scaling. The OC P95 (11156ms) is **2.43× the Non-OC SLO** (4591ms) — a clear SLO violation that the Golgi ML classifier should detect.
+The degradation ratio is consistently ~2.4-2.5× across all percentiles, confirming that this is pure CPU-bound scaling. The OC P95 (11156ms) is **2.43× the Non-OC SLO** (4591ms) — a clear SLO violation that demonstrates the predictable, proportional degradation the Golgi paper hypothesizes for CPU-bound functions.
 
 ---
 
@@ -2115,7 +2115,7 @@ The OpenFaaS `of-watchdog` (the process that wraps our function code) maintains 
 1. If current_inflight < max_inflight: accept the request, increment counter, fork/call the handler
 2. If current_inflight >= max_inflight: reject with HTTP 429
 
-This prevents a single function pod from being overwhelmed. In the Golgi system, understanding how functions behave under concurrency is important because the ML classifier needs to distinguish between latency increases caused by CPU overcommitment vs latency increases caused by queuing under load.
+This prevents a single function pod from being overwhelmed. Understanding how functions behave under concurrency is important for our study because the concurrency sweep experiment (Phase 3) needs to distinguish between latency increases caused by CPU overcommitment vs latency increases caused by queuing under load.
 
 **Test methodology:**
 For each function, we launch exactly 4 `curl` requests in background (`&`), then `wait` for all to complete. We check that all 4 return HTTP 200.
@@ -2183,7 +2183,7 @@ Finished: 2026-04-12T02:03:54Z
 
 **Key insight:** The `image-resize` concurrent latency (19.5s) is almost exactly 4× its sequential latency (4.5s). This is because it is purely CPU-bound — 4 requests competing for the same CPU core means each gets 1/4 of the time. I/O-bound functions (`db-query`) show no degradation because they spend most of their time waiting on Redis, not using CPU.
 
-This behavior has direct implications for the Golgi system: when the ML classifier sees `image-resize-oc` latency spike from 11s to 48s under concurrent load, it needs to distinguish between "this is overcommitment degradation" (should trigger migration) vs "this is normal queuing under concurrent load" (should not trigger migration). The metric collector's `inflight_requests` counter is the key discriminator.
+This behavior has direct implications for our concurrency sweep experiment (Phase 3): when `image-resize-oc` latency spikes from 11s to 48s under concurrent load, we need to disentangle "this is overcommitment degradation" from "this is normal queuing under concurrent load." Measuring both Non-OC and OC variants at multiple concurrency levels will reveal whether these effects are additive or superlinear.
 
 ---
 
@@ -2204,7 +2204,7 @@ All measurements are from 200 sequential requests per function, collected on 202
 
 #### SLO Thresholds (Non-OC P95 Values)
 
-These are the Service Level Objective thresholds that the ML classifier will use in Phase 3. A function is in "SLO violation" when its observed latency exceeds these values.
+These are the Service Level Objective thresholds used throughout all subsequent experiments. A function is in "SLO violation" when its observed latency exceeds these values.
 
 ```
 SLO_image_resize = 4591 ms
@@ -2213,7 +2213,7 @@ SLO_log_filter   = 17 ms
 ```
 
 **How these will be used:**
-In Phase 3, the ML classifier receives real-time metrics (CPU utilization, memory utilization, inflight requests, etc.) for each function instance. For each metric snapshot, the classifier predicts whether the function is likely to violate its SLO. The SLO thresholds defined above are the ground truth labels: if `observed_latency > SLO_threshold`, the label is "SLO violated" (positive class); otherwise "SLO met" (negative class).
+In the degradation curve experiment (Phase 2), we deploy each function at five CPU levels and measure whether the SLO is violated at each level. In the concurrency sweep (Phase 3), we measure whether concurrent load pushes latency past these thresholds. In the tail latency analysis (Phase 4), we examine how P99 and P99.9 relate to these P95-based thresholds. The thresholds provide a consistent reference point across all experiments.
 
 ---
 
@@ -2230,7 +2230,7 @@ In Phase 3, the ML classifier receives real-time metrics (CPU utilization, memor
 2. **I/O-bound functions** (`db-query`): Degradation is minimal (1.33×). The function barely uses CPU — its bottleneck is Redis network I/O, which is unaffected by CPU limits.
 3. **Mixed functions** (`log-filter`): Degradation is **disproportionately high** (4.53×) relative to CPU reduction (500m → 206m = 2.43× reduction). This is because CFS throttling creates bimodal latency: requests that finish within one CFS period are fast (16-18ms), but those that exhaust the CPU quota are paused for the remainder of the period (~60-80ms extra). The P95 captures this second mode.
 
-These findings validate the Golgi paper's core assumption: **different function profiles respond differently to overcommitment**, and a smart scheduler can exploit this to reduce resource waste without violating SLOs.
+These findings are consistent with the Golgi paper's core hypothesis: **different function profiles respond differently to overcommitment.** The degradation is profile-dependent and, for CPU-bound functions, predictable. Our subsequent experiments will characterize this behavior across multiple overcommitment levels and concurrency conditions.
 
 ---
 
@@ -2291,35 +2291,35 @@ All benchmark scripts used in this step have been saved to [`scripts/`](scripts/
 [x] All functions handle concurrent requests (max_inflight = 4) — 24/24 passed
 ```
 
-**Phase 1 is COMPLETE.** All benchmark functions are deployed, baseline latencies are measured, and SLO thresholds are established. The next phase (Phase 2 — Metric Collector) will build the DaemonSet that scrapes per-function metrics every 500ms from cgroup and the OpenFaaS watchdog.
+**Phase 1 is COMPLETE.** All benchmark functions are deployed, baseline latencies are measured, and SLO thresholds are established. The next phase (Phase 2 — Multi-Level Degradation Curves) will deploy each function at five CPU levels and measure how P95 latency degrades as CPU allocation decreases.
 
 ---
 
-### Phase 1 Analysis: Validating the Golgi Paper's Core Hypothesis
+### Phase 1 Analysis: Profile-Dependent Degradation Under CFS Quota Enforcement
 
-This section analyzes whether our Phase 1 results are consistent with the Golgi paper's assumptions and whether the experiment is on track for a faithful replication.
+This section analyzes the Phase 1 baseline results for evidence of profile-dependent degradation under resource overcommitment, and what they imply for the subsequent experiments.
 
-#### The Hypothesis Under Test
+#### The Phenomenon Under Study
 
-The Golgi paper's central claim is that **different serverless function profiles respond differently to resource overcommitment**, and a smart scheduler can exploit this asymmetry to reduce cluster resource waste without violating Service Level Objectives. Specifically:
+The core question is whether **different serverless function profiles respond differently to resource overcommitment** due to how the Linux CFS bandwidth controller enforces CPU limits. If such asymmetry exists, it could be exploited by overcommitment-aware schedulers to reduce resource waste without violating SLOs. Specifically:
 
 - **CPU-bound functions** (e.g., image processing, cryptography) are heavily impacted by CPU overcommitment because their latency is directly proportional to available CPU time.
 - **I/O-bound functions** (e.g., database queries, API calls) are minimally impacted because their latency is dominated by network/disk wait times, not CPU computation.
 - **Mixed functions** (e.g., log processing with regex) fall somewhere in between, with degradation depending on the ratio of CPU work to I/O wait.
 
-If this hypothesis holds, the system can safely overcommit I/O-bound functions (saving resources) while protecting CPU-bound functions from overcommitment (preserving SLOs). The ML classifier's job is to predict which category a function falls into based on real-time metrics.
+If profile-dependent degradation exists, a platform could safely overcommit I/O-bound functions (saving resources) while protecting CPU-bound functions from overcommitment (preserving SLOs). Our study characterizes this degradation behavior empirically across controlled experiments.
 
-#### Our Results vs the Paper's Expectations
+#### Baseline Degradation Results
 
-| Function | Profile | OC Degradation (P95 Ratio) | Paper's Expectation | Match? |
+| Function | Profile | OC Degradation (P95 Ratio) | Expected Behavior | Observed? |
 |---|---|---|---|---|
 | `image-resize` | CPU-bound | **2.43×** (4591ms → 11156ms) | High degradation, proportional to CPU reduction | **Yes** |
 | `db-query` | I/O-bound | **1.33×** (21ms → 28ms) | Minimal degradation | **Yes** |
-| `log-filter` | Mixed | **4.53×** (17ms → 77ms) | Moderate-to-high, with CFS throttling effects | **Yes** |
+| `log-filter` | Mixed | **4.53×** (17ms → 77ms) | Non-linear degradation from CFS throttling | **Yes** |
 
-All three function profiles behave exactly as the paper predicts.
+All three function profiles exhibit distinct degradation patterns consistent with the CFS quota enforcement mechanism.
 
-#### Detailed Validation Points
+#### Detailed Analysis
 
 **1. CPU-bound scaling is linear and predictable**
 
@@ -2332,7 +2332,7 @@ Observed latency ratio:  4499ms → 11057ms = 2.46× increase
 
 These two ratios match to within 0.4%. This confirms that for purely CPU-bound workloads, the latency increase from overcommitment is **directly proportional** to the CPU reduction. The CFS scheduler enforces CPU limits by giving the container a fixed quota of CPU time per scheduling period (100ms by default). A container with 405m CPU gets 40.5ms of CPU time per 100ms period; it runs for 40.5ms then is paused for 59.5ms. The total wall-clock time to complete a fixed amount of CPU work scales inversely with the quota.
 
-This predictability is important for the Golgi system: it means the ML classifier can reliably predict whether a CPU-bound function will violate its SLO under a given overcommitment ratio, because the relationship is linear.
+This predictability is significant: it means that for CPU-bound functions, the latency impact of any given overcommitment level can be predicted from the CPU reduction ratio alone. Our degradation curve experiment (Phase 2) will verify whether this linear relationship holds across five overcommitment levels.
 
 **2. I/O-bound functions are resilient to overcommitment**
 
@@ -2351,7 +2351,7 @@ The degradation is far less than the CPU reduction because the function's ~18ms 
 
 None of these are affected by CPU limits. The small P95 increase (7ms) comes from occasional CFS throttling during the brief CPU bursts (JSON serialization, Python bytecode execution). But these bursts are short enough that most requests complete within a single CFS period without hitting the quota.
 
-This is the key insight that Golgi exploits: **you can safely reduce CPU allocation for I/O-bound functions by 2.7× and only see 1.3× latency increase.** The saved CPU can be reallocated to CPU-bound functions that need it.
+This is the key finding for overcommitment policy: **you can safely reduce CPU allocation for I/O-bound functions by 2.7× and only see 1.3× latency increase.** Our degradation curve experiment (Phase 2) will determine whether this resilience holds at even more aggressive overcommitment levels.
 
 **3. Mixed functions exhibit bimodal CFS throttling behavior**
 
@@ -2372,7 +2372,7 @@ The P95 captures the slow mode because roughly 50% of requests land in each mode
 
 This bimodal pattern is a known artifact of CFS CPU throttling and has been documented in Kubernetes production environments. It is particularly pronounced for "mixed" workloads whose CPU burst size is close to the CFS quota — they oscillate between completing within one period and spilling into the next.
 
-For the Golgi ML classifier, this bimodal behavior means that mixed functions need more careful handling than either pure CPU-bound or pure I/O-bound functions. The classifier must learn to detect when a function is in the "CFS boundary zone" and recommend appropriate resource adjustments.
+For overcommitment-aware scheduling, this bimodal behavior means that mixed functions need more careful handling than either pure CPU-bound or pure I/O-bound functions. Our CFS boundary analysis experiment (Phase 5) will systematically sweep the CPU limit to map exactly where the bimodal behavior appears and disappears relative to the function's burst size.
 
 **4. Zero errors confirm infrastructure stability**
 
@@ -2391,14 +2391,14 @@ All 6 functions handled 4 concurrent requests (their configured `max_inflight` l
 
 These Phase 1 results establish the foundation for the remaining phases:
 
-1. **Phase 2 (Metric Collector):** The DaemonSet will scrape CPU utilization, memory utilization, inflight requests, and other metrics from cgroup and the watchdog. Our baseline measurements show that these metrics will produce clearly different signatures for each function profile:
-   - `image-resize`: high CPU utilization, low memory relative to limit, consistent latency
-   - `db-query`: low CPU utilization, low memory, consistent latency with occasional jitter
-   - `log-filter`: moderate CPU utilization, bimodal latency pattern
+1. **Phase 2 (Multi-Level Degradation Curves):** We will deploy each function at five CPU levels (100%, 80%, 60%, 40%, 20%) and measure P95 latency at each. The baseline results suggest we will see:
+   - `image-resize`: linear degradation curve (proportional to CPU reduction)
+   - `db-query`: flat curve (resilient until very low CPU levels)
+   - `log-filter`: non-linear curve with a knee where CFS boundary crossing begins
 
-2. **Phase 3 (ML Classifier):** The SLO thresholds (4591ms, 21ms, 17ms) provide the ground truth labels for training the classifier. The clear separation between Non-OC and OC latency distributions means the classifier should achieve high accuracy — the signal-to-noise ratio is strong.
+2. **Phase 3 (Concurrency Sweep):** The concurrency test already shows that CPU-bound functions scale ~4× under 4 concurrent requests. The sweep experiment will cross this with overcommitment levels to determine whether the effects are additive or superlinear.
 
-3. **Phase 4 (Router):** The overcommitment impact data shows that the router's migration decisions can produce real resource savings: overcommitting `db-query` from 500m to 185m CPU saves 315m CPU per replica with only 1.33× latency increase (still within acceptable bounds). Across many function replicas, these savings add up significantly.
+3. **Phase 5 (CFS Boundary Analysis):** The bimodal distribution in log-filter-oc (fast mode ~16-18ms, slow mode ~50-97ms) provides a clear starting point. The fine-grained CPU sweep will pinpoint the exact quota value where bimodality emerges and confirm the CFS mechanism as the causal explanation.
 
 #### Phase 1 Plots
 
@@ -2418,4 +2418,4 @@ These plots are referenced in the final report (`docs/final_report.md`, Section 
 
 #### Conclusion
 
-**The replication is on track.** Our Phase 1 results are consistent with the Golgi paper's assumptions about function profile behavior under overcommitment. The three-way separation between CPU-bound, I/O-bound, and mixed function responses provides the signal that the ML classifier will need to learn in Phase 3. The zero-error rate and stable infrastructure give us confidence that subsequent phases will build on a reliable foundation.
+**The empirical study is on track.** Our Phase 1 baseline results are consistent with the Golgi paper's hypothesis about profile-dependent degradation under overcommitment. The clear three-way separation between CPU-bound (proportional degradation), I/O-bound (resilient), and mixed (disproportionate, bimodal) responses provides strong initial evidence. The subsequent experiments (degradation curves, concurrency sweep, tail latency analysis, CFS boundary analysis) will systematically deepen this characterization. The zero-error rate and stable infrastructure give us confidence that subsequent phases will build on a reliable foundation.

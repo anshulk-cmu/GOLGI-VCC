@@ -33,3 +33,16 @@ node_modules/
 *.log
 tmp/
 temp/
+
+# Container image tarballs (too large for git)
+*.tar
+*.tar.gz
+
+# OpenFaaS shrinkwrap per-function build outputs (generated on AWS)
+# The template directories (build/python3-http/, build/golang-http/) ARE tracked.
+build/image-resize/
+build/image-resize-oc/
+build/db-query/
+build/db-query-oc/
+build/log-filter/
+build/log-filter-oc/

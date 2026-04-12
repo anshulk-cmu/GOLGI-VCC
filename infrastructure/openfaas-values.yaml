@@ -1,0 +1,29 @@
+# OpenFaaS Helm Chart Values
+# These values were originally passed as --set flags during the Helm install in Phase 0.
+# Captured here for reproducibility. To install:
+#   helm upgrade openfaas --install openfaas/openfaas \
+#     --namespace openfaas \
+#     -f infrastructure/openfaas-values.yaml
+#
+# Prerequisites:
+#   helm repo add openfaas https://openfaas.github.io/faas-netes/
+#   kubectl create namespace openfaas
+#   kubectl create namespace openfaas-fn
+
+# User functions are deployed to this namespace
+functionNamespace: openfaas-fn
+
+# We manage auth manually (password set via kubectl secret, not auto-generated)
+generateBasicAuth: false
+basic_auth: true
+
+# Single-node gateway and queue worker (sufficient for our experiments)
+gateway:
+  replicas: 1
+
+queueWorker:
+  replicas: 1
+
+# NodePort exposes the gateway on port 31112 on all cluster nodes
+# This allows curl from the master node to reach the gateway at http://127.0.0.1:31112
+serviceType: NodePort

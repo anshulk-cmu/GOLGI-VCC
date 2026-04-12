@@ -1,4 +1,4 @@
-# Golgi Replication — Execution Log: Phase 0
+# Execution Log: Phase 0 — Infrastructure Setup
 
 > **Plan document:** [`PROJECT_PLAN.md`](PROJECT_PLAN.md)
 > **Next phase:** [`execution_log_phase1.md`](execution_log_phase1.md)
@@ -67,7 +67,7 @@ A quick-reference of all AWS resources created so far. Updated as new resources 
 
 ## Phase 0 — AWS Infrastructure Setup
 
-**Goal of Phase 0:** Set up the foundational AWS infrastructure — account, CLI, networking, EC2 instances, Kubernetes cluster, and serverless platform — so that all subsequent phases (benchmark functions, metric collection, ML module, router) have a working platform to deploy on.
+**Goal of Phase 0:** Set up the foundational AWS infrastructure — account, CLI, networking, EC2 instances, Kubernetes cluster, and serverless platform — so that all subsequent phases (benchmark function deployment, latency measurement, degradation experiments, CFS analysis) have a working platform to run on.
 
 **What gets built in this phase:**
 1. An AWS account with a dedicated IAM user (Step 0.1)
@@ -274,8 +274,8 @@ aws configure set aws_secret_access_key <secret-from-csv>
 - It has the widest availability of instance types — important for `t3.xlarge` which we use for worker nodes.
 - It has the most AMI (Amazon Machine Image) options.
 - It generally has the lowest spot instance prices due to the largest capacity pool.
-- The replication plan specifies `us-east-1` for all resources.
-- If you are physically closer to another region (e.g., `ap-south-1` for India), latency to your instances will be higher, but this only affects SSH responsiveness, not the experiment itself (all Golgi components run within the same region).
+- Our project plan specifies `us-east-1` for all resources.
+- If you are physically closer to another region (e.g., `ap-south-1` for India), latency to your instances will be higher, but this only affects SSH responsiveness, not the experiment itself (all cluster components run within the same region).
 
 **Why JSON output?**
 - JSON is machine-parseable — we can use the `--query` flag with JMESPath expressions to extract specific fields (e.g., `--query 'Vpc.VpcId'` to get just the VPC ID from a `create-vpc` response).
@@ -512,7 +512,7 @@ A subnet is a subdivision of the VPC's IP range, placed in a specific Availabili
 - We use `10.0.1.0/24` (not `10.0.0.0/24`) by convention — leaving `10.0.0.0/24` available for a future public subnet if needed.
 
 **Why a single subnet?**
-The replication plan calls for all nodes in one subnet for simplicity. In a production setup, you would typically have:
+Our experimental design calls for all nodes in one subnet for simplicity. In a production setup, you would typically have:
 - A public subnet (for load balancers and bastion hosts)
 - A private subnet (for application servers and databases)
 - Subnets in multiple AZs (for high availability)
@@ -522,8 +522,8 @@ For a course project, one subnet is sufficient. All our nodes need to communicat
 **Why `us-east-1a`?**
 - Availability Zones (AZs) are physically separate data centers within a region. `us-east-1` has 6 AZs (a through f).
 - Keeping all nodes in the same AZ eliminates cross-AZ network latency (~0.5-1ms round-trip), which matters for:
-  - The metric collector pushing data to the ML module every few seconds
-  - The router forwarding requests to function instances
+  - The benchmark scripts invoking functions and collecting latency data
+  - The load generator sending requests to function endpoints
   - k3s control plane communicating with kubelets on worker nodes
 - Cross-AZ data transfer costs $0.01/GB in each direction. Staying in one AZ avoids this entirely.
 - The downside is no AZ-level fault tolerance — if `us-east-1a` has an outage, all our instances go down. This is acceptable for a course project.
@@ -752,9 +752,9 @@ aws ec2 authorize-security-group-ingress \
 | 8472 | UDP | Flannel/VXLAN | Pod-to-pod networking overlay |
 | 2379-2380 | TCP | etcd (embedded in k3s) | Cluster state storage |
 | 8080 | TCP | OpenFaaS gateway | Function invocation |
-| 5000 | TCP | ML module (Flask) | Prediction API |
-| 9090 | TCP | Metric collector | Prometheus-style metrics |
-| Various | TCP | Golgi router, watchdogs | Custom Golgi components |
+| 5000 | TCP | Analysis scripts (Flask) | Data collection API |
+| 9090 | TCP | Prometheus | Metrics scraping |
+| Various | TCP | OpenFaaS watchdogs | Function lifecycle management |
 
 Rather than listing every port individually (error-prone and fragile), we allow all traffic from the VPC CIDR. This is safe because the VPC is isolated — only our 5 instances are in it, and external traffic is filtered by the other rules.
 
@@ -769,7 +769,7 @@ aws ec2 authorize-security-group-ingress \
   --cidr 98.111.206.214/32
 ```
 - Rule ID: `sgr-0a10400d7071c047d`
-- **Why:** The Golgi router and OpenFaaS gateway expose HTTP services on port 8080. During development, we want to:
+- **Why:** The OpenFaaS gateway exposes HTTP services on port 8080. During development, we want to:
   - Test function invocations from our laptop: `curl http://<master-ip>:8080/function/my-function`
   - Access the OpenFaaS dashboard (web UI)
   - Monitor request routing in real-time
@@ -802,8 +802,8 @@ aws ec2 authorize-security-group-ingress \
 ```
 - Rule ID: `sgr-091113b47567aa920`
 - **Why:** Kubernetes assigns NodePort services a port in the 30000–32767 range by default. In addition to OpenFaaS on 31112, we may expose other services as NodePorts during development:
-  - The ML module's Flask API (for testing predictions)
-  - The metric collector's debug endpoint
+  - Data collection or analysis endpoints (if needed)
+  - Debug endpoints for experiment monitoring
   - Prometheus or Grafana (if added for monitoring)
   Opening the full range avoids coming back to add rules later.
 
@@ -815,7 +815,7 @@ aws ec2 authorize-security-group-ingress \
 |---|---|---|---|---|
 | `sgr-0d73120ea74fd47ae` | 22 | TCP | `98.111.206.214/32` | SSH remote login |
 | `sgr-01ecb81eb0f8c1dbb` | All | All | `10.0.0.0/16` | Inter-node cluster communication |
-| `sgr-0a10400d7071c047d` | 8080 | TCP | `98.111.206.214/32` | Golgi router / OpenFaaS HTTP |
+| `sgr-0a10400d7071c047d` | 8080 | TCP | `98.111.206.214/32` | OpenFaaS HTTP |
 | `sgr-0e094855d57d95a23` | 31112 | TCP | `98.111.206.214/32` | OpenFaaS gateway NodePort |
 | `sgr-091113b47567aa920` | 30000–32767 | TCP | `98.111.206.214/32` | K8s NodePort services |
 | *(default)* | All | All | `0.0.0.0/0` | Outbound (all egress allowed) |
@@ -829,29 +829,29 @@ aws ec2 authorize-security-group-ingress \
 
 #### Steps 0.10–0.11: EC2 Instance Provisioning — COMPLETED (2026-04-11)
 
-**What we did:** Launched 5 EC2 (Elastic Compute Cloud) instances into our VPC — the physical virtual machines that form the Golgi cluster. These are the actual computers (running in AWS data centers) where all software will be installed and experiments will run.
+**What we did:** Launched 5 EC2 (Elastic Compute Cloud) instances into our VPC — the virtual machines that form our experiment cluster. These are the actual computers (running in AWS data centers) where all software will be installed and experiments will run.
 
 **Why 5 instances?**
-The Golgi system has distinct roles that should run on separate machines to faithfully replicate the paper's architecture:
+Our experimental setup has distinct roles that should run on separate machines to ensure clean measurements:
 
 | Role | Why It Needs Its Own Machine |
 |---|---|
-| **Master** | Runs the Kubernetes control plane (k3s server), which manages scheduling, service discovery, and cluster state. Also hosts the OpenFaaS gateway and Golgi router. Separating the control plane from workers prevents control plane overhead from affecting function execution latency measurements. |
+| **Master** | Runs the Kubernetes control plane (k3s server), which manages scheduling, service discovery, and cluster state. Also hosts the OpenFaaS gateway. Separating the control plane from workers prevents control plane overhead from affecting function execution latency measurements. |
 | **Workers (×3)** | Run the actual serverless function containers — both OC (overcommitted) and Non-OC (full-resource) instances. Three workers are needed to demonstrate collocation interference: when multiple functions share a node, they compete for CPU, memory, and cache. The paper uses 7 workers; we use 3 as a cost-conscious minimum that still shows the effect. |
-| **Load Generator** | Runs Locust to generate HTTP requests simulating real-world traffic. This must be on a separate machine so that the load generation itself does not consume CPU/memory on the cluster nodes, which would skew the metric measurements. If Locust ran on a worker node, its CPU usage would appear in the cgroup metrics and confuse the ML classifier. |
+| **Load Generator** | Generates HTTP requests to benchmark function latency under various conditions. This must be on a separate machine so that the load generation itself does not consume CPU/memory on the cluster nodes, which would skew the latency measurements. If the load generator ran on a worker node, its CPU usage would appear in the cgroup metrics and contaminate our results. |
 
 **Why these specific instance types?**
 
 **t3.medium (master + loadgen) — 2 vCPU, 4 GB RAM, $0.0416/hr:**
-- The master runs k3s server + etcd + OpenFaaS gateway + Golgi router. These are lightweight services — k3s server uses ~500 MB RAM and minimal CPU at our scale (5 nodes, ~20 pods). 4 GB is plenty.
+- The master runs k3s server + etcd + OpenFaaS gateway. These are lightweight services — k3s server uses ~500 MB RAM and minimal CPU at our scale (5 nodes, ~20 pods). 4 GB is plenty.
 - The load generator runs Locust, which is a Python-based HTTP load testing tool. At our target load (~100 RPS), Locust uses ~200-500 MB RAM and 1 vCPU. 2 vCPUs give headroom.
 - t3.medium is the cheapest instance type that has enough RAM for k3s (t3.micro with 1 GB would cause OOM kills under load).
 
 **t3.xlarge (workers) — 4 vCPU, 16 GB RAM, $0.1664/hr:**
-- Each worker hosts multiple function containers simultaneously. The plan calls for 3 functions, each deployed as both OC and Non-OC, with potentially multiple replicas. That's 6+ containers per worker.
+- Each worker hosts multiple function containers simultaneously. Our experiment deploys 3 functions, each in both OC and Non-OC variants, with potentially multiple replicas. That's 6+ containers per worker.
 - Non-OC containers get full resources (e.g., 512 MB each). OC containers get reduced resources (e.g., ~200 MB each, calculated by the overcommitment formula `0.3 * claimed + 0.7 * actual`).
 - With 16 GB RAM and ~2 GB for the OS/k3s/kubelet, we have ~14 GB for function containers — enough for ~20-30 containers per worker.
-- 4 vCPUs allow us to observe CPU contention when multiple containers compete for CPU time — this is the core phenomenon Golgi's ML classifier learns to detect.
+- 4 vCPUs allow us to observe CPU contention when multiple containers compete for CPU time — this is the core phenomenon that drives overcommitment-induced latency degradation.
 - The paper uses c5.9xlarge (36 vCPU, 72 GB) which costs $1.53/hr. t3.xlarge is 10x cheaper while still demonstrating the same principles at a smaller scale.
 
 **Why t3 (burstable) instead of c5/m5 (fixed performance)?**
@@ -896,7 +896,7 @@ Output: `ami-0ea87431b78a82070  al2023-ami-2023.11.20260406.2-kernel-6.1-x86_64`
   - Ubuntu 22.04: Also good, but Amazon Linux has tighter EC2 integration and faster boot times.
   - Debian: Less common on EC2, fewer pre-installed AWS tools.
   - CentOS Stream: Red Hat ecosystem, similar to AL2023 but with less AWS-specific optimization.
-  - Windows Server: Not suitable — k3s, OpenFaaS, and all Golgi components are Linux-based.
+  - Windows Server: Not suitable — k3s, OpenFaaS, and all our experiment tooling are Linux-based.
 
 **AMI details:**
 - AMI ID: `ami-0ea87431b78a82070`
@@ -949,9 +949,9 @@ aws ec2 run-instances \
 ```
 Output: `i-0485789851116b85e`
 
-- Role: k3s control plane, OpenFaaS gateway, Golgi router
+- Role: k3s control plane, OpenFaaS gateway
 - Instance type: t3.medium (2 vCPU, 4 GB RAM)
-- This is the brain of the cluster — it runs the Kubernetes API server that all other nodes register with, and the routing logic that makes Golgi's scheduling decisions.
+- This is the brain of the cluster — it runs the Kubernetes API server that all other nodes register with, and the OpenFaaS gateway through which all function invocations are routed.
 
 **Instance 2: Worker node 1**
 
@@ -995,7 +995,7 @@ aws ec2 run-instances \
 ```
 Output: `i-07c1c3c65c833a675`
 
-- Workers 1–3 are identical in configuration. They all run as k3s agents (worker nodes) and host function containers. Having 3 workers allows the Kubernetes scheduler to distribute pods across nodes, creating the collocation scenarios that Golgi's ML classifier learns from.
+- Workers 1–3 are identical in configuration. They all run as k3s agents (worker nodes) and host function containers. Having 3 workers allows the Kubernetes scheduler to distribute pods across nodes, creating the collocation scenarios where we measure contention effects under overcommitment.
 
 **Instance 5: Load generator**
 
@@ -1011,7 +1011,7 @@ aws ec2 run-instances \
 ```
 Output: `i-07b31e765e0ff1b45`
 
-- This machine is intentionally outside the k3s cluster. It runs Locust (a Python load testing framework) that generates HTTP requests to the Golgi router on the master node. Keeping it separate ensures load generation does not interfere with the cluster's CPU/memory measurements.
+- This machine is intentionally outside the k3s cluster. It runs load testing tools that generate HTTP requests to the OpenFaaS gateway on the master node. Keeping it separate ensures load generation does not interfere with the cluster's CPU/memory measurements.
 
 ---
 
@@ -1226,12 +1226,12 @@ The paper uses kubeadm (the standard Kubernetes installation tool). We use k3s i
 | Pod/Service/Deployment | Same | Same |
 | CNCF certified | Yes | Yes |
 
-The critical point is **API compatibility**: every `kubectl` command, every YAML manifest, every Helm chart that works on full Kubernetes works identically on k3s. OpenFaaS cannot tell the difference. Our Golgi components cannot tell the difference. The only difference is operational — k3s is simpler to install and uses fewer resources.
+The critical point is **API compatibility**: every `kubectl` command, every YAML manifest, every Helm chart that works on full Kubernetes works identically on k3s. OpenFaaS cannot tell the difference. Our benchmark and analysis tools cannot tell the difference. The only difference is operational — k3s is simpler to install and uses fewer resources.
 
 **Why `--disable traefik`?**
 k3s bundles Traefik as its default ingress controller (handles HTTP routing into the cluster). We disable it because:
-- We are building our own Golgi router (Nginx + Python sidecar) that handles request routing
-- Traefik would listen on the same ports and conflict with our router
+- We use the OpenFaaS gateway directly for function invocation — Traefik adds an unnecessary layer
+- Traefik would consume ports and resources we don't need for our experiments
 - Disabling it saves ~100 MB of RAM on the master node
 
 **k3s architecture diagram:**
@@ -1679,13 +1679,13 @@ node/golgi-worker-3 labeled
 | Label | Value | Purpose |
 |---|---|---|
 | `role` | `worker` | Distinguishes workers from the master. We can use `nodeSelector: {role: worker}` in pod specs to ensure function containers only run on workers, never on the master. |
-| `node-type` | `function-host` | More specific label for Golgi. In later phases, we may differentiate between nodes hosting OC instances vs Non-OC instances. This label marks nodes eligible to host function containers. |
+| `node-type` | `function-host` | More specific label for our experiments. In later phases, we may differentiate between nodes hosting OC instances vs Non-OC instances. This label marks nodes eligible to host function containers. |
 
 **Why label nodes?**
 By default, Kubernetes will schedule pods on **any** node with sufficient resources, including the master. This is undesirable because:
 - The master runs the k3s control plane (API server, etcd, scheduler). Function containers would compete for CPU/memory with the control plane.
 - The metric collector measures container resource usage to make routing decisions. If function containers run on the master alongside control plane processes, the metrics would be noisy and misleading.
-- In the paper, the master node exclusively runs the Golgi router and ML module — it does not host function instances.
+- Following the Golgi paper's architecture (which we use as our infrastructure reference), the master node should not host function instances — it runs only the control plane and gateway.
 
 With labels, we can add a `nodeSelector` to our OpenFaaS function deployments:
 ```yaml
@@ -2108,7 +2108,7 @@ All 5 deployments are `1/1 READY`:
 
 | Component | What it does | Why we need it |
 |---|---|---|
-| **gateway** | HTTP API gateway — all function invocations go through this. Exposes port 31112 via NodePort. | Core component. Our Golgi router (Phase 4) will call functions through this gateway. |
+| **gateway** | HTTP API gateway — all function invocations go through this. Exposes port 31112 via NodePort. | Core component. All our benchmark scripts invoke functions through this gateway. |
 | **prometheus** | Scrapes metrics from the gateway and function pods every 5 seconds. | We will query Prometheus in Phase 2 for OpenFaaS-level metrics like invocation count, duration, and in-flight requests. |
 | **alertmanager** | Routes alerts from Prometheus (e.g., function failure thresholds). | Used internally by OpenFaaS auto-scaling. We won't configure custom alerts but it's required. |
 | **nats** | Lightweight message broker for asynchronous function invocations. | If we invoke functions asynchronously (fire-and-forget), NATS queues the request. |
@@ -2214,19 +2214,19 @@ The `perf` version matches the kernel version (6.1.166) — this is correct. `pe
 
 #### Step 0.19: Install Python and ML Packages on Master Node — COMPLETED (2026-04-11)
 
-**What we did:** Installed Python 3 pip, C build tools (gcc, python3-devel, libffi-devel), and then the Python packages needed for the ML module (Phase 3), the router (Phase 4), and the load generator (Phase 6).
+**What we did:** Installed Python 3 pip, C build tools (gcc, python3-devel, libffi-devel), and then the Python packages needed for data analysis, statistical computation, visualization, and load generation in subsequent experiment phases.
 
 **Why these packages?**
 
 | Package | Version Installed | Why we need it |
 |---|---|---|
-| `flask` | 3.1.3 | The Golgi router (Phase 4) runs as a Flask HTTP server |
-| `requests` | 2.32.5 | The router calls the OpenFaaS gateway via HTTP |
-| `numpy` | 2.0.2 | Numerical operations in the ML pipeline |
-| `scikit-learn` | 1.6.1 | ML framework — the Golgi classifier is a Mondrian Forest (random forest variant). scikit-learn provides `RandomForestClassifier` as our simplified substitute |
-| `pandas` | 2.3.3 | Data manipulation — loading and processing the training data CSV files |
-| `matplotlib` | 3.9.4 | Plotting — generating the evaluation graphs in Phase 9 (latency CDFs, cost comparisons, etc.) |
-| `locust` | 2.34.0 | Load testing framework — used in Phase 6 to replay Azure Function traces and generate realistic request patterns |
+| `flask` | 3.1.3 | Lightweight HTTP server for data collection endpoints if needed during experiments |
+| `requests` | 2.32.5 | HTTP client for invoking functions via the OpenFaaS gateway from benchmark scripts |
+| `numpy` | 2.0.2 | Numerical operations for latency statistics (percentile calculations, statistical tests) |
+| `scikit-learn` | 1.6.1 | Statistical analysis — distribution fitting, clustering for identifying bimodal latency patterns |
+| `pandas` | 2.3.3 | Data manipulation — loading and processing latency measurement CSV files |
+| `matplotlib` | 3.9.4 | Plotting — generating evaluation graphs (latency CDFs, degradation curves, box plots, etc.) |
+| `locust` | 2.34.0 | Load testing framework — used to generate concurrent request patterns for the concurrency sweep experiments |
 
 **Sub-step 1: Install pip on master**
 
