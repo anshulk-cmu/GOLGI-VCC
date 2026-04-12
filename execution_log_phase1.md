@@ -2400,6 +2400,22 @@ These Phase 1 results establish the foundation for the remaining phases:
 
 3. **Phase 4 (Router):** The overcommitment impact data shows that the router's migration decisions can produce real resource savings: overcommitting `db-query` from 500m to 185m CPU saves 315m CPU per replica with only 1.33× latency increase (still within acceptable bounds). Across many function replicas, these savings add up significantly.
 
+#### Phase 1 Plots
+
+We generated 5 publication-quality plots from the baseline latency data using `scripts/generate-phase1-plots.py`. All plots are saved to `results/phase1/plots/`:
+
+| Plot | File | Description |
+|---|---|---|
+| Fig 1 | `fig1_cdf_fast_functions.png` | CDF of fast functions (db-query, log-filter) with SLO lines |
+| Fig 2 | `fig2_cdf_per_function.png` | Per-function CDF: Non-OC vs OC with SLO violation shading |
+| Fig 3 | `fig3_p95_bar_chart.png` | Horizontal grouped P95 bar chart with degradation ratios |
+| Fig 4 | `fig4_box_plots.png` | Box plots showing distribution shape and bimodal behavior |
+| Fig 5 | `fig5_degradation_ratios.png` | Degradation ratio comparison (P95, mean, CPU reduction) |
+
+The P95 bar chart (Fig 3) uses a horizontal layout with two panels — CPU-bound on the left and fast functions (I/O-bound, mixed) on the right — to accommodate the two-order-of-magnitude scale difference between image-resize (~4500-11000ms) and db-query/log-filter (~17-77ms).
+
+These plots are referenced in the final report (`docs/final_report.md`, Section 5.5) and the README.
+
 #### Conclusion
 
 **The replication is on track.** Our Phase 1 results are consistent with the Golgi paper's assumptions about function profile behavior under overcommitment. The three-way separation between CPU-bound, I/O-bound, and mixed function responses provides the signal that the ML classifier will need to learn in Phase 3. The zero-error rate and stable infrastructure give us confidence that subsequent phases will build on a reliable foundation.

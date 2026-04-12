@@ -45,15 +45,15 @@ PROFILE_LABELS = {"image-resize": "CPU-bound", "db-query": "I/O-bound", "log-fil
 
 plt.rcParams.update({
     "font.family": "serif",
-    "font.size": 11,
-    "axes.labelsize": 12,
-    "axes.titlesize": 13,
-    "legend.fontsize": 9,
-    "xtick.labelsize": 10,
-    "ytick.labelsize": 10,
+    "font.size": 13,
+    "axes.labelsize": 15,
+    "axes.titlesize": 16,
+    "legend.fontsize": 11,
+    "xtick.labelsize": 12,
+    "ytick.labelsize": 12,
     "figure.dpi": 150,
     "savefig.dpi": 300,
-    "savefig.pad_inches": 0.1,
+    "savefig.pad_inches": 0.2,
     "axes.grid": True,
     "grid.alpha": 0.3,
     "grid.linestyle": "--",
@@ -91,7 +91,7 @@ SLO = {func: stats[func]["p95"] for func in NON_OC_FUNCS}
 
 def plot_cdf_fast():
     """CDF of db-query and log-filter (Non-OC and OC variants)."""
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(10, 7))
 
     for func in ["db-query", "db-query-oc", "log-filter", "log-filter-oc"]:
         s = np.sort(data[func])
@@ -106,11 +106,11 @@ def plot_cdf_fast():
         ax.axvline(SLO[func], color=FUNCTIONS[func]["color"], linestyle=":",
                    alpha=0.6, linewidth=1)
         ax.text(SLO[func] + 0.5, 0.05, f'SLO={SLO[func]}ms',
-                color=FUNCTIONS[func]["color"], fontsize=8, rotation=90, va="bottom")
+                color=FUNCTIONS[func]["color"], fontsize=10, rotation=90, va="bottom")
 
     # P95 reference line
     ax.axhline(0.95, color="gray", linestyle=":", alpha=0.5, linewidth=1)
-    ax.text(95, 0.955, "P95", color="gray", fontsize=8)
+    ax.text(95, 0.955, "P95", color="gray", fontsize=10)
 
     ax.set_xlabel("Latency (ms)")
     ax.set_ylabel("CDF")
@@ -119,7 +119,8 @@ def plot_cdf_fast():
     ax.set_ylim(0, 1.02)
     ax.set_xlim(10, 105)
 
-    fig.savefig(os.path.join(PLOT_DIR, "fig1_cdf_fast_functions.png"))
+    fig.tight_layout()
+    fig.savefig(os.path.join(PLOT_DIR, "fig1_cdf_fast_functions.png"), bbox_inches="tight")
     plt.close(fig)
     print("  [1/5] fig1_cdf_fast_functions.png")
 
@@ -128,7 +129,7 @@ def plot_cdf_fast():
 
 def plot_cdf_per_function():
     """Three-panel CDF: one per function, Non-OC vs OC with SLO threshold."""
-    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+    fig, axes = plt.subplots(3, 1, figsize=(10, 18))
 
     for idx, (non_oc, oc) in enumerate(PAIRS):
         ax = axes[idx]
@@ -150,7 +151,7 @@ def plot_cdf_per_function():
 
         # SLO line
         ax.axvline(slo_val, color="red", linestyle=":", linewidth=1.5, alpha=0.7)
-        ax.text(slo_val, 0.02, f" SLO={slo_val}ms", color="red", fontsize=8,
+        ax.text(slo_val, 0.02, f" SLO={slo_val}ms", color="red", fontsize=11,
                 ha="left", va="bottom")
 
         # P95 reference
@@ -161,16 +162,15 @@ def plot_cdf_per_function():
                    alpha=0.08, color="red")
 
         ax.set_xlabel("Latency (ms)")
-        if idx == 0:
-            ax.set_ylabel("CDF")
+        ax.set_ylabel("CDF")
         ax.set_title(f"{non_oc} ({profile})")
-        ax.legend(loc="lower right", fontsize=8)
+        ax.legend(loc="lower right", fontsize=11)
         ax.set_ylim(0, 1.02)
 
     fig.suptitle("Latency CDF — Non-OC vs OC per Function (with SLO Threshold)",
-                 fontsize=14, y=1.02)
-    fig.tight_layout()
-    fig.savefig(os.path.join(PLOT_DIR, "fig2_cdf_per_function.png"))
+                 fontsize=18)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    fig.savefig(os.path.join(PLOT_DIR, "fig2_cdf_per_function.png"), bbox_inches="tight")
     plt.close(fig)
     print("  [2/5] fig2_cdf_per_function.png")
 
@@ -178,72 +178,75 @@ def plot_cdf_per_function():
 # ── Plot 3: P95 bar chart — grouped bars with degradation annotations ──────
 
 def plot_p95_bar_chart():
-    """Grouped bar chart of P95 latency: Non-OC vs OC, with degradation ratio."""
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5),
-                              gridspec_kw={"width_ratios": [1, 2.5]})
+    """Horizontal grouped bar chart of P95 latency: Non-OC vs OC, with degradation ratio.
+    Two side-by-side panels: CPU-bound (left) and fast functions (right)."""
+    fig, (ax_cpu, ax_fast) = plt.subplots(1, 2, figsize=(14, 4.5),
+                                           gridspec_kw={"width_ratios": [1, 1]})
+    h = 0.30  # bar height
 
-    # Left panel: image-resize (large values)
-    ax_left = axes[0]
+    # ── Left panel: CPU-bound (image-resize) ──
     func = "image-resize"
-    non_oc_p95 = stats[func]["p95"]
-    oc_p95 = stats[func + "-oc"]["p95"]
-    ratio = oc_p95 / non_oc_p95
+    color = "#2563EB"
+    non_oc = stats[func]["p95"]
+    oc = stats[func + "-oc"]["p95"]
+    ratio = oc / non_oc
 
-    x = np.array([0])
-    w = 0.35
-    bars1 = ax_left.bar(x - w/2, [non_oc_p95], w, label="Non-OC", color="#2563EB", alpha=0.85)
-    bars2 = ax_left.bar(x + w/2, [oc_p95], w, label="OC", color="#2563EB", alpha=0.45,
-                        edgecolor="#2563EB", linewidth=1.5)
+    ax_cpu.barh(0 + h/2, non_oc, h, color=color, alpha=0.85, label="Non-OC")
+    ax_cpu.barh(0 - h/2, oc, h, color=color, alpha=0.40,
+                edgecolor=color, linewidth=1.5, label="OC")
 
-    ax_left.bar_label(bars1, fmt="%.0f ms", fontsize=9, padding=3)
-    ax_left.bar_label(bars2, fmt="%.0f ms", fontsize=9, padding=3)
+    ax_cpu.text(non_oc + oc * 0.02, h/2,
+                f"{non_oc:.0f} ms", va="center", ha="left", fontsize=11)
+    ax_cpu.text(oc + oc * 0.02, -h/2,
+                f"{oc:.0f} ms  ({ratio:.1f}x)", va="center", ha="left",
+                fontsize=11, fontweight="bold", color="#DC2626")
 
-    # Degradation ratio annotation
-    mid_y = (non_oc_p95 + oc_p95) / 2
-    ax_left.annotate(f"{ratio:.1f}x", xy=(w/2 + 0.02, oc_p95),
-                     fontsize=11, fontweight="bold", color="#DC2626",
-                     ha="left", va="bottom")
+    ax_cpu.set_xlim(0, oc * 1.40)
+    ax_cpu.set_yticks([0])
+    ax_cpu.set_yticklabels(["image-resize\n(CPU-bound)"], fontsize=12)
+    ax_cpu.set_xlabel("P95 Latency (ms)")
+    ax_cpu.set_title("CPU-bound", fontsize=14)
+    ax_cpu.legend(loc="lower right", fontsize=10)
 
-    ax_left.set_xticks(x)
-    ax_left.set_xticklabels(["image-resize\n(CPU-bound)"])
-    ax_left.set_ylabel("P95 Latency (ms)")
-    ax_left.set_title("CPU-bound Function")
-    ax_left.legend(fontsize=9)
+    # ── Right panel: Fast functions (db-query, log-filter) ──
+    fast_funcs = ["db-query", "log-filter"]
+    fast_profiles = ["I/O-bound", "Mixed"]
+    fast_colors = ["#059669", "#D97706"]
 
-    # Right panel: db-query and log-filter (small values)
-    ax_right = axes[1]
-    func_names = ["db-query", "log-filter"]
-    profiles = ["I/O-bound", "Mixed"]
-    colors = ["#059669", "#D97706"]
+    for i, (f, c, p) in enumerate(zip(fast_funcs, fast_colors, fast_profiles)):
+        noc = stats[f]["p95"]
+        ocv = stats[f + "-oc"]["p95"]
+        r = ocv / noc
 
-    x = np.arange(len(func_names))
-    non_oc_vals = [stats[f]["p95"] for f in func_names]
-    oc_vals = [stats[f + "-oc"]["p95"] for f in func_names]
-    ratios = [oc / non_oc for non_oc, oc in zip(non_oc_vals, oc_vals)]
+        ax_fast.barh(i + h/2, noc, h, color=c, alpha=0.85,
+                     label="Non-OC" if i == 0 else None)
+        ax_fast.barh(i - h/2, ocv, h, color=c, alpha=0.40,
+                     edgecolor=c, linewidth=1.5,
+                     label="OC" if i == 0 else None)
 
-    for i, (f, c) in enumerate(zip(func_names, colors)):
-        b1 = ax_right.bar(i - w/2, non_oc_vals[i], w, color=c, alpha=0.85,
-                          label="Non-OC" if i == 0 else None)
-        b2 = ax_right.bar(i + w/2, oc_vals[i], w, color=c, alpha=0.45,
-                          edgecolor=c, linewidth=1.5,
-                          label="OC" if i == 0 else None)
-        ax_right.bar_label(b1, fmt="%.0f ms", fontsize=9, padding=3)
-        ax_right.bar_label(b2, fmt="%.0f ms", fontsize=9, padding=3)
+        max_oc = max(stats[ff + "-oc"]["p95"] for ff in fast_funcs)
+        ax_fast.text(noc + max_oc * 0.03, i + h/2,
+                     f"{noc:.0f} ms", va="center", ha="left", fontsize=11)
+        ax_fast.text(ocv + max_oc * 0.03, i - h/2,
+                     f"{ocv:.0f} ms  ({r:.1f}x)", va="center", ha="left",
+                     fontsize=11, fontweight="bold", color="#DC2626")
 
-        ax_right.annotate(f"{ratios[i]:.1f}x", xy=(i + w/2 + 0.02, oc_vals[i]),
-                         fontsize=11, fontweight="bold", color="#DC2626",
-                         ha="left", va="bottom")
+    max_oc = max(stats[f + "-oc"]["p95"] for f in fast_funcs)
+    ax_fast.set_xlim(0, max_oc * 1.45)
+    ax_fast.set_yticks(range(len(fast_funcs)))
+    ax_fast.set_yticklabels([f"{f}\n({p})" for f, p in zip(fast_funcs, fast_profiles)],
+                            fontsize=12)
+    ax_fast.set_xlabel("P95 Latency (ms)")
+    ax_fast.set_title("I/O-bound & Mixed", fontsize=14)
+    ax_fast.legend(loc="lower right", fontsize=10)
 
-    ax_right.set_xticks(x)
-    ax_right.set_xticklabels([f"{f}\n({p})" for f, p in zip(func_names, profiles)])
-    ax_right.set_ylabel("P95 Latency (ms)")
-    ax_right.set_title("Fast Functions (I/O-bound, Mixed)")
-    ax_right.legend(fontsize=9)
+    # Invert both so top-to-bottom reading order
+    ax_cpu.invert_yaxis()
+    ax_fast.invert_yaxis()
 
-    fig.suptitle("P95 Latency: Non-OC vs OC (with Degradation Ratio)",
-                 fontsize=14, y=1.02)
-    fig.tight_layout()
-    fig.savefig(os.path.join(PLOT_DIR, "fig3_p95_bar_chart.png"))
+    fig.suptitle("P95 Latency: Non-OC vs OC (with Degradation Ratio)", fontsize=16)
+    fig.tight_layout(rect=[0, 0, 1, 0.92])
+    fig.savefig(os.path.join(PLOT_DIR, "fig3_p95_bar_chart.png"), bbox_inches="tight")
     plt.close(fig)
     print("  [3/5] fig3_p95_bar_chart.png")
 
@@ -252,8 +255,8 @@ def plot_p95_bar_chart():
 
 def plot_box_plots():
     """Box plots for all 6 functions, showing distribution shape and outliers."""
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5),
-                              gridspec_kw={"width_ratios": [1, 2.5]})
+    fig, axes = plt.subplots(2, 1, figsize=(10, 12),
+                              gridspec_kw={"height_ratios": [1, 1]})
 
     # Left panel: image-resize variants (large latencies)
     ax_left = axes[0]
@@ -274,7 +277,7 @@ def plot_box_plots():
     # SLO line
     ax_left.axhline(SLO["image-resize"], color="red", linestyle=":", linewidth=1.5, alpha=0.7)
     ax_left.text(2.55, SLO["image-resize"], f'SLO={SLO["image-resize"]}ms',
-                 color="red", fontsize=8, va="center")
+                 color="red", fontsize=11, va="center")
 
     ax_left.set_ylabel("Latency (ms)")
     ax_left.set_title("image-resize (CPU-bound)")
@@ -311,16 +314,16 @@ def plot_box_plots():
     # SLO lines
     ax_right.axhline(SLO["db-query"], color="#059669", linestyle=":", linewidth=1, alpha=0.6)
     ax_right.axhline(SLO["log-filter"], color="#D97706", linestyle=":", linewidth=1, alpha=0.6)
-    ax_right.text(4.55, SLO["db-query"], f'SLO={SLO["db-query"]}ms', color="#059669", fontsize=8, va="center")
-    ax_right.text(4.55, SLO["log-filter"], f'SLO={SLO["log-filter"]}ms', color="#D97706", fontsize=8, va="center")
+    ax_right.text(4.55, SLO["db-query"], f'SLO={SLO["db-query"]}ms', color="#059669", fontsize=11, va="center")
+    ax_right.text(4.55, SLO["log-filter"], f'SLO={SLO["log-filter"]}ms', color="#D97706", fontsize=11, va="center")
 
     ax_right.set_ylabel("Latency (ms)")
     ax_right.set_title("db-query (I/O-bound) & log-filter (Mixed)")
 
     fig.suptitle("Latency Distribution — Box Plots (200 requests each)",
-                 fontsize=14, y=1.02)
-    fig.tight_layout()
-    fig.savefig(os.path.join(PLOT_DIR, "fig4_box_plots.png"))
+                 fontsize=18)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    fig.savefig(os.path.join(PLOT_DIR, "fig4_box_plots.png"), bbox_inches="tight")
     plt.close(fig)
     print("  [4/5] fig4_box_plots.png")
 
@@ -329,7 +332,7 @@ def plot_box_plots():
 
 def plot_degradation_ratios():
     """Bar chart of P95 degradation ratios with CPU reduction reference line."""
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(11, 7))
 
     func_names = ["image-resize", "db-query", "log-filter"]
     profiles = ["CPU-bound", "I/O-bound", "Mixed"]
@@ -357,7 +360,7 @@ def plot_degradation_ratios():
 
     # Value labels
     for bars in [bars1, bars2, bars3]:
-        ax.bar_label(bars, fmt="%.1fx", fontsize=9, padding=3)
+        ax.bar_label(bars, fmt="%.1fx", fontsize=11, padding=5)
 
     # Reference line at 1.0 (no degradation)
     ax.axhline(1.0, color="black", linestyle="-", linewidth=0.5, alpha=0.3)
@@ -366,18 +369,19 @@ def plot_degradation_ratios():
     ax.set_xticklabels([f"{f}\n({p})" for f, p in zip(func_names, profiles)])
     ax.set_ylabel("Ratio")
     ax.set_title("Overcommitment Impact — Degradation Ratios by Function Profile")
-    ax.legend(loc="upper left", fontsize=9)
+    ax.legend(loc="upper left", fontsize=11)
     ax.set_ylim(0, max(p95_ratios + cpu_ratios) * 1.25)
 
     # Annotation box
-    textstr = ("CPU-bound: degradation matches CPU cut (2.4x ≈ 2.5x)\n"
+    textstr = ("CPU-bound: degradation matches CPU cut (2.4x \u2248 2.5x)\n"
                "I/O-bound: minimal degradation despite 2.7x CPU cut\n"
                "Mixed: disproportionate degradation from CFS throttling")
     props = dict(boxstyle="round,pad=0.5", facecolor="lightyellow", alpha=0.8)
-    ax.text(0.98, 0.98, textstr, transform=ax.transAxes, fontsize=8,
+    ax.text(0.98, 0.98, textstr, transform=ax.transAxes, fontsize=10,
             verticalalignment="top", horizontalalignment="right", bbox=props)
 
-    fig.savefig(os.path.join(PLOT_DIR, "fig5_degradation_ratios.png"))
+    fig.tight_layout()
+    fig.savefig(os.path.join(PLOT_DIR, "fig5_degradation_ratios.png"), bbox_inches="tight")
     plt.close(fig)
     print("  [5/5] fig5_degradation_ratios.png")
 

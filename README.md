@@ -225,6 +225,18 @@ Measured from 200 sequential requests per function on 2026-04-12. These establis
 
 **Key finding:** Overcommitment impact varies by profile — CPU-bound functions degrade 2.4× (proportional to CPU cut), I/O-bound degrade only 1.3×, and mixed functions show 4.5× degradation from bimodal CFS throttling. This validates the Golgi paper's core hypothesis that different function profiles respond differently to overcommitment.
 
+### Phase 1 Plots
+
+![P95 Latency — Non-OC vs OC](results/phase1/plots/fig3_p95_bar_chart.png)
+
+![Latency CDF — Fast Functions](results/phase1/plots/fig1_cdf_fast_functions.png)
+
+![Latency CDF — Per Function](results/phase1/plots/fig2_cdf_per_function.png)
+
+![Latency Distribution — Box Plots](results/phase1/plots/fig4_box_plots.png)
+
+![Degradation Ratios](results/phase1/plots/fig5_degradation_ratios.png)
+
 ## Reproducibility
 
 Every command executed during this project is recorded in the execution logs with full output, explanations, and reasoning. The infrastructure scripts in `infrastructure/` can recreate the entire cluster from scratch. To rebuild:

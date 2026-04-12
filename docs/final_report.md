@@ -448,16 +448,38 @@ The trade-off is straightforward. Lower concurrency per container means the syst
 
 ### 5.5 SLO Definition
 
-<!--
-- Methodology: deploy Non-OC function, send 200 requests with no concurrent load, record latencies
-- SLO threshold = P95 latency of this baseline measurement
-- Per-function SLO values: (to be filled after Step 1.4)
-  - SLO_image_resize = ??? ms
-  - SLO_db_query = ??? ms
-  - SLO_log_filter = ??? ms
-- A request "violates" the SLO if its latency exceeds this threshold
-- This matches the paper's methodology (Section 5.1)
--->
+We define the SLO threshold for each function as the P95 latency of its Non-OC variant under zero concurrent load, matching the paper's methodology (Section 5.1). We deploy the Non-OC function, send 200 sequential requests with no concurrent load, and record all latencies. A request "violates" the SLO if its latency exceeds this threshold.
+
+The measured SLO thresholds from our baseline (Phase 1, 200 requests per function):
+
+| Function | Profile | SLO Threshold (Non-OC P95) |
+|---|---|---|
+| image-resize | CPU-bound | 4591 ms |
+| db-query | I/O-bound | 21 ms |
+| log-filter | Mixed | 17 ms |
+
+The full baseline latency distributions are shown below. Figure 1 shows CDF curves for the fast functions (db-query and log-filter), with the SLO threshold marked for each. Figure 2 shows per-function CDF comparisons of Non-OC vs OC variants with the SLO violation region shaded.
+
+![CDF — Fast Functions (db-query, log-filter)](../results/phase1/plots/fig1_cdf_fast_functions.png)
+*Figure 1: Latency CDF for I/O-bound and mixed functions. Solid lines are Non-OC, dashed lines are OC. Vertical dotted lines mark the SLO threshold.*
+
+![CDF — Non-OC vs OC per Function](../results/phase1/plots/fig2_cdf_per_function.png)
+*Figure 2: Per-function CDF comparison. The red-shaded region marks the SLO violation zone. CPU-bound functions show a clean rightward shift under OC; mixed functions show a long tail from bimodal CFS throttling.*
+
+Figure 3 compares P95 latency across all functions, separated into CPU-bound and fast (I/O-bound, mixed) panels to accommodate the two-order-of-magnitude scale difference.
+
+![P95 Latency — Non-OC vs OC](../results/phase1/plots/fig3_p95_bar_chart.png)
+*Figure 3: P95 latency comparison. Degradation ratios show that CPU-bound functions degrade proportionally to CPU reduction (2.4x), I/O-bound functions are resilient (1.3x), and mixed functions suffer disproportionately (4.5x) from CFS throttling.*
+
+Figure 4 shows the latency distributions as box plots, revealing the bimodal behavior of the mixed function under overcommitment.
+
+![Box Plots — Latency Distribution](../results/phase1/plots/fig4_box_plots.png)
+*Figure 4: Box plots showing distribution shape. The log-filter OC variant exhibits wide spread from bimodal CFS behavior.*
+
+Figure 5 summarizes the degradation ratios alongside CPU reduction ratios, visualizing the core hypothesis that different function profiles respond differently to overcommitment.
+
+![Degradation Ratios](../results/phase1/plots/fig5_degradation_ratios.png)
+*Figure 5: Degradation ratio comparison. CPU-bound degradation matches CPU reduction (2.4x ≈ 2.5x). I/O-bound functions absorb a 2.7x CPU cut with only 1.3x degradation. Mixed functions show disproportionate degradation from CFS quota boundary effects.*
 
 ### 5.6 Repeatability
 
