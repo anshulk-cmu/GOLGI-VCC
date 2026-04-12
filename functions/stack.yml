@@ -7,7 +7,7 @@ functions:
   image-resize:
     lang: python3-http
     handler: ./functions/image-resize
-    image: golgi/image-resize:latest
+    image: golgi/image-resize:v1.0
     environment:
       write_timeout: 60s
       read_timeout: 60s
@@ -23,7 +23,7 @@ functions:
   image-resize-oc:
     lang: python3-http
     handler: ./functions/image-resize
-    image: golgi/image-resize:latest
+    image: golgi/image-resize:v1.0
     environment:
       write_timeout: 60s
       read_timeout: 60s
@@ -39,7 +39,7 @@ functions:
   db-query:
     lang: python3-http
     handler: ./functions/db-query
-    image: golgi/db-query:latest
+    image: golgi/db-query:v1.0
     environment:
       REDIS_HOST: redis.openfaas-fn.svc.cluster.local
       max_inflight: 4
@@ -53,7 +53,7 @@ functions:
   db-query-oc:
     lang: python3-http
     handler: ./functions/db-query
-    image: golgi/db-query:latest
+    image: golgi/db-query:v1.0
     environment:
       REDIS_HOST: redis.openfaas-fn.svc.cluster.local
       max_inflight: 4
@@ -67,7 +67,7 @@ functions:
   log-filter:
     lang: golang-http
     handler: ./functions/log-filter
-    image: golgi/log-filter:latest
+    image: golgi/log-filter:v1.0
     environment:
       max_inflight: 4
     requests:
@@ -80,7 +80,7 @@ functions:
   log-filter-oc:
     lang: golang-http
     handler: ./functions/log-filter
-    image: golgi/log-filter:latest
+    image: golgi/log-filter:v1.0
     environment:
       max_inflight: 4
     requests:

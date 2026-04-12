@@ -1,0 +1,340 @@
+---
+# image-resize (Non-OC)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: image-resize
+  namespace: openfaas-fn
+  labels:
+    faas_function: image-resize
+    app: image-resize
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      faas_function: image-resize
+  template:
+    metadata:
+      labels:
+        faas_function: image-resize
+        app: image-resize
+    spec:
+      containers:
+      - name: image-resize
+        image: golgi/image-resize:v1.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+          protocol: TCP
+        env:
+        - name: write_timeout
+          value: "60s"
+        - name: read_timeout
+          value: "60s"
+        - name: exec_timeout
+          value: "60s"
+        - name: max_inflight
+          value: "4"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "1000m"
+          limits:
+            memory: "512Mi"
+            cpu: "1000m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: image-resize
+  namespace: openfaas-fn
+  labels:
+    faas_function: image-resize
+    app: image-resize
+spec:
+  selector:
+    faas_function: image-resize
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP
+---
+# image-resize-oc (OC)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: image-resize-oc
+  namespace: openfaas-fn
+  labels:
+    faas_function: image-resize-oc
+    app: image-resize-oc
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      faas_function: image-resize-oc
+  template:
+    metadata:
+      labels:
+        faas_function: image-resize-oc
+        app: image-resize-oc
+    spec:
+      containers:
+      - name: image-resize-oc
+        image: golgi/image-resize:v1.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+          protocol: TCP
+        env:
+        - name: write_timeout
+          value: "60s"
+        - name: read_timeout
+          value: "60s"
+        - name: exec_timeout
+          value: "60s"
+        - name: max_inflight
+          value: "4"
+        resources:
+          requests:
+            memory: "210Mi"
+            cpu: "405m"
+          limits:
+            memory: "210Mi"
+            cpu: "405m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: image-resize-oc
+  namespace: openfaas-fn
+  labels:
+    faas_function: image-resize-oc
+    app: image-resize-oc
+spec:
+  selector:
+    faas_function: image-resize-oc
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP
+---
+# db-query (Non-OC)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: db-query
+  namespace: openfaas-fn
+  labels:
+    faas_function: db-query
+    app: db-query
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      faas_function: db-query
+  template:
+    metadata:
+      labels:
+        faas_function: db-query
+        app: db-query
+    spec:
+      containers:
+      - name: db-query
+        image: golgi/db-query:v1.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+          protocol: TCP
+        env:
+        - name: REDIS_HOST
+          value: "redis.openfaas-fn.svc.cluster.local"
+        - name: max_inflight
+          value: "4"
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "500m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: db-query
+  namespace: openfaas-fn
+  labels:
+    faas_function: db-query
+    app: db-query
+spec:
+  selector:
+    faas_function: db-query
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP
+---
+# db-query-oc (OC)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: db-query-oc
+  namespace: openfaas-fn
+  labels:
+    faas_function: db-query-oc
+    app: db-query-oc
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      faas_function: db-query-oc
+  template:
+    metadata:
+      labels:
+        faas_function: db-query-oc
+        app: db-query-oc
+    spec:
+      containers:
+      - name: db-query-oc
+        image: golgi/db-query:v1.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+          protocol: TCP
+        env:
+        - name: REDIS_HOST
+          value: "redis.openfaas-fn.svc.cluster.local"
+        - name: max_inflight
+          value: "4"
+        resources:
+          requests:
+            memory: "105Mi"
+            cpu: "185m"
+          limits:
+            memory: "105Mi"
+            cpu: "185m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: db-query-oc
+  namespace: openfaas-fn
+  labels:
+    faas_function: db-query-oc
+    app: db-query-oc
+spec:
+  selector:
+    faas_function: db-query-oc
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP
+---
+# log-filter (Non-OC)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: log-filter
+  namespace: openfaas-fn
+  labels:
+    faas_function: log-filter
+    app: log-filter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      faas_function: log-filter
+  template:
+    metadata:
+      labels:
+        faas_function: log-filter
+        app: log-filter
+    spec:
+      containers:
+      - name: log-filter
+        image: golgi/log-filter:v1.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+          protocol: TCP
+        env:
+        - name: max_inflight
+          value: "4"
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "500m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: log-filter
+  namespace: openfaas-fn
+  labels:
+    faas_function: log-filter
+    app: log-filter
+spec:
+  selector:
+    faas_function: log-filter
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP
+---
+# log-filter-oc (OC)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: log-filter-oc
+  namespace: openfaas-fn
+  labels:
+    faas_function: log-filter-oc
+    app: log-filter-oc
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      faas_function: log-filter-oc
+  template:
+    metadata:
+      labels:
+        faas_function: log-filter-oc
+        app: log-filter-oc
+    spec:
+      containers:
+      - name: log-filter-oc
+        image: golgi/log-filter:v1.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+          protocol: TCP
+        env:
+        - name: max_inflight
+          value: "4"
+        resources:
+          requests:
+            memory: "98Mi"
+            cpu: "206m"
+          limits:
+            memory: "98Mi"
+            cpu: "206m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: log-filter-oc
+  namespace: openfaas-fn
+  labels:
+    faas_function: log-filter-oc
+    app: log-filter-oc
+spec:
+  selector:
+    faas_function: log-filter-oc
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP

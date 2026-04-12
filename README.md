@@ -143,6 +143,7 @@ The system operates as a closed feedback loop across four stages:
 │   └── teardown.sh                  #   Full cleanup (instances, VPC, networking)
 ├── functions/                       # Benchmark serverless functions
 │   ├── stack.yml                    #   OpenFaaS deployment config (6 function variants)
+│   ├── functions-deploy.yaml        #   Raw K8s Deployment+Service manifests (used for deploy)
 │   ├── redis-deployment.yaml        #   Redis K8s manifest for db-query
 │   ├── image-resize/                #   CPU-bound: PIL Lanczos resampling
 │   │   ├── handler.py
@@ -153,6 +154,12 @@ The system operates as a closed feedback loop across four stages:
 │   └── log-filter/                  #   Mixed: regex parsing + IP anonymization (Go)
 │       ├── handler.go
 │       └── go.mod
+├── scripts/                         # Benchmark and testing scripts
+│   ├── smoke-test.sh                #   Quick health check for all 6 functions
+│   ├── warmup.sh                    #   Warmup requests to eliminate cold-start skew
+│   ├── benchmark-latency.sh         #   200-request sequential latency measurement
+│   ├── compute-stats.py             #   P50/P95/P99/mean/stddev from latency files
+│   └── test-concurrency.sh          #   Verify max_inflight=4 with concurrent requests
 │
 └── (Future phases will add: metric-collector/, ml-module/, router/,
      vertical-scaler/, load-generator/, monitoring/, analysis/, results/)
@@ -168,9 +175,9 @@ The system operates as a closed feedback loop across four stages:
 - [x] Phase 0: Python + dependencies installed on all nodes, cgroup v2 verified
 - [x] Phase 1.1: Redis deployed to openfaas-fn namespace (PING verified)
 - [x] Phase 1.2: OpenFaaS function YAML validated, handler signatures fixed for templates, code transferred to master, shrinkwrap verified
+- [x] Phase 1.3: Docker installed on master, 3 function images built, 6 variants deployed via raw K8s manifests (faas-cli deploy skipped — used kubectl apply with functions-deploy.yaml)
+- [x] Phase 1.4: Baseline P95 latency measured (SLO thresholds: image-resize 4591ms, db-query 21ms, log-filter 17ms), concurrency test passed (24/24)
 - [x] Report: Sections 1-3 written (Introduction, Background, System Design)
-- [ ] Phase 1.3: Build and deploy 6 function variants to OpenFaaS (Docker install needed first)
-- [ ] Phase 1.4: Baseline P95 latency measurement (SLO thresholds)
 - [ ] Phase 2: Metric collector (cgroup v2 DaemonSet)
 - [ ] Phase 3: ML module (Random Forest classifier)
 - [ ] Phase 4: Router (Nginx + Python prediction sidecar)
@@ -202,6 +209,21 @@ Each function is deployed in two variants: **Non-OC** (full resources) and **OC*
 | log-filter | 256 Mi | ~30 Mi | 98 Mi (0.3×256 + 0.7×30) | 62% |
 
 The same formula applies to CPU: image-resize drops from 1000m to 405m, db-query from 500m to 185m, log-filter from 500m to 206m. These reductions are the source of cost savings — if the ML classifier can correctly predict when OC instances are safe to use, the cluster runs the same workload with ~60% fewer reserved resources.
+
+## Baseline Latency Results (Phase 1)
+
+Measured from 200 sequential requests per function on 2026-04-12. These establish the SLO thresholds for the ML classifier.
+
+| Function | Profile | CPU | P50 | P95 (SLO) | P99 | Mean | Errors |
+|---|---|---|---|---|---|---|---|
+| image-resize | CPU-bound (Non-OC) | 1000m | 4485ms | **4591ms** | 4762ms | 4499ms | 0/200 |
+| image-resize-oc | CPU-bound (OC) | 405m | 11067ms | 11156ms | 11276ms | 11057ms | 0/200 |
+| db-query | I/O-bound (Non-OC) | 500m | 18ms | **21ms** | 24ms | 19ms | 0/200 |
+| db-query-oc | I/O-bound (OC) | 185m | 20ms | 28ms | 35ms | 21ms | 0/200 |
+| log-filter | Mixed (Non-OC) | 500m | 16ms | **17ms** | 18ms | 16ms | 0/200 |
+| log-filter-oc | Mixed (OC) | 206m | 25ms | 77ms | 96ms | 35ms | 0/200 |
+
+**Key finding:** Overcommitment impact varies by profile — CPU-bound functions degrade 2.4× (proportional to CPU cut), I/O-bound degrade only 1.3×, and mixed functions show 4.5× degradation from bimodal CFS throttling. This validates the Golgi paper's core hypothesis that different function profiles respond differently to overcommitment.
 
 ## Reproducibility
 
