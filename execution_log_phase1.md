@@ -1,6 +1,6 @@
 # Golgi Replication — Execution Log: Phase 1
 
-> **Plan document:** [`GOLGI_REPLICATION_PLAN.md`](GOLGI_REPLICATION_PLAN.md)
+> **Plan document:** [`PROJECT_PLAN.md`](PROJECT_PLAN.md)
 > **Previous phase:** [`execution_log_phase0.md`](execution_log_phase0.md)
 > **Course:** CSL7510 — Cloud Computing
 > **Students:** Anshul Kumar (M25AI2036), Neha Prasad (M25AI2056)

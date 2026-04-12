@@ -460,25 +460,40 @@ The measured SLO thresholds from our baseline (Phase 1, 200 requests per functio
 
 The full baseline latency distributions are shown below. Figure 1 shows CDF curves for the fast functions (db-query and log-filter), with the SLO threshold marked for each. Figure 2 shows per-function CDF comparisons of Non-OC vs OC variants with the SLO violation region shaded.
 
-![CDF — Fast Functions (db-query, log-filter)](../results/phase1/plots/fig1_cdf_fast_functions.png)
+<p align="center">
+  <img src="../results/phase1/plots/fig1_cdf_fast_functions.png" width="72%" />
+</p>
+
 *Figure 1: Latency CDF for I/O-bound and mixed functions. Solid lines are Non-OC, dashed lines are OC. Vertical dotted lines mark the SLO threshold.*
 
-![CDF — Non-OC vs OC per Function](../results/phase1/plots/fig2_cdf_per_function.png)
+<p align="center">
+  <img src="../results/phase1/plots/fig2_cdf_per_function.png" width="65%" />
+</p>
+
 *Figure 2: Per-function CDF comparison. The red-shaded region marks the SLO violation zone. CPU-bound functions show a clean rightward shift under OC; mixed functions show a long tail from bimodal CFS throttling.*
 
 Figure 3 compares P95 latency across all functions, separated into CPU-bound and fast (I/O-bound, mixed) panels to accommodate the two-order-of-magnitude scale difference.
 
-![P95 Latency — Non-OC vs OC](../results/phase1/plots/fig3_p95_bar_chart.png)
+<p align="center">
+  <img src="../results/phase1/plots/fig3_p95_bar_chart.png" width="80%" />
+</p>
+
 *Figure 3: P95 latency comparison. Degradation ratios show that CPU-bound functions degrade proportionally to CPU reduction (2.4x), I/O-bound functions are resilient (1.3x), and mixed functions suffer disproportionately (4.5x) from CFS throttling.*
 
 Figure 4 shows the latency distributions as box plots, revealing the bimodal behavior of the mixed function under overcommitment.
 
-![Box Plots — Latency Distribution](../results/phase1/plots/fig4_box_plots.png)
+<p align="center">
+  <img src="../results/phase1/plots/fig4_box_plots.png" width="65%" />
+</p>
+
 *Figure 4: Box plots showing distribution shape. The log-filter OC variant exhibits wide spread from bimodal CFS behavior.*
 
 Figure 5 summarizes the degradation ratios alongside CPU reduction ratios, visualizing the core hypothesis that different function profiles respond differently to overcommitment.
 
-![Degradation Ratios](../results/phase1/plots/fig5_degradation_ratios.png)
+<p align="center">
+  <img src="../results/phase1/plots/fig5_degradation_ratios.png" width="72%" />
+</p>
+
 *Figure 5: Degradation ratio comparison. CPU-bound degradation matches CPU reduction (2.4x ≈ 2.5x). I/O-bound functions absorb a 2.7x CPU cut with only 1.3x degradation. Mixed functions show disproportionate degradation from CFS quota boundary effects.*
 
 ### 5.6 Repeatability
