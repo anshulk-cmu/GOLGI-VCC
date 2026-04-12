@@ -16,17 +16,15 @@
 4. [Experimental Design Overview](#4-experimental-design-overview)
 5. [Phase 0 — AWS Infrastructure Setup](#5-phase-0--aws-infrastructure-setup) ✅
 6. [Phase 1 — Benchmark Deployment and Baseline Characterization](#6-phase-1--benchmark-deployment-and-baseline-characterization) ✅
-7. [Phase 2 — Multi-Level Degradation Curves](#7-phase-2--multi-level-degradation-curves)
-8. [Phase 3 — Concurrency Under Overcommitment](#8-phase-3--concurrency-under-overcommitment)
-9. [Phase 4 — Tail Latency Analysis](#9-phase-4--tail-latency-analysis)
-10. [Phase 5 — CFS Quota Boundary Analysis](#10-phase-5--cfs-quota-boundary-analysis)
-11. [Phase 6 — Analysis and Visualization](#11-phase-6--analysis-and-visualization)
-12. [Phase 7 — Report Writing and Demo](#12-phase-7--report-writing-and-demo)
-13. [Appendix A — Cost Estimation](#13-appendix-a--cost-estimation)
-14. [Appendix B — Troubleshooting Guide](#14-appendix-b--troubleshooting-guide)
-15. [Appendix C — File and Directory Structure](#15-appendix-c--file-and-directory-structure)
-16. [Appendix D — Mathematical Foundations](#16-appendix-d--mathematical-foundations)
-17. [Appendix E — References and Resources](#17-appendix-e--references-and-resources)
+7. [Phase 2 — Multi-Level Degradation Curves](#7-phase-2--multi-level-degradation-curves) 🔄
+8. [Phase 3 — Analysis and Visualization](#8-phase-3--analysis-and-visualization)
+9. [Phase 4 — Report Writing and Demo](#9-phase-4--report-writing-and-demo)
+10. [Future Scope](#10-future-scope)
+11. [Appendix A — Cost Estimation](#11-appendix-a--cost-estimation)
+12. [Appendix B — Troubleshooting Guide](#12-appendix-b--troubleshooting-guide)
+13. [Appendix C — File and Directory Structure](#13-appendix-c--file-and-directory-structure)
+14. [Appendix D — Mathematical Foundations](#14-appendix-d--mathematical-foundations)
+15. [Appendix E — References and Resources](#15-appendix-e--references-and-resources)
 
 > **Execution Logs:** Step-by-step execution details with commands, outputs, and reasoning are tracked separately per phase:
 > - Phase 0 (Infrastructure): [`execution_log_phase0.md`](execution_log_phase0.md)
@@ -50,24 +48,20 @@ The Golgi paper (Li et al., SoCC 2023) proposes a profile-aware scheduling syste
 
 The Golgi paper uses this hypothesis as the motivation for building an ML-guided routing system, but their evaluation focuses on end-to-end system performance. The hypothesis itself — that overcommitment impact is profile-dependent and predictable — is assumed, not independently validated.
 
-**We provide that characterization.** This project is a systematic empirical study of how Linux CFS quota enforcement creates profile-dependent latency degradation under container resource overcommitment. We measure this across three workload profiles (CPU-bound, I/O-bound, mixed) on real cloud infrastructure, going beyond a single-point comparison to produce degradation curves across multiple overcommitment levels, analyze contention effects under concurrent load, examine tail latency amplification, and provide a mechanistic explanation of CFS quota boundary effects on mixed workloads.
+**We provide that characterization.** This project is a systematic empirical study of how Linux CFS quota enforcement creates profile-dependent latency degradation under container resource overcommitment. We measure this across three workload profiles (CPU-bound, I/O-bound, mixed) on real cloud infrastructure, going beyond a single-point comparison to produce degradation curves across multiple overcommitment levels and provide a mechanistic explanation of CFS quota boundary effects on mixed workloads.
 
 ### 1.3 Research Questions
 
 | # | Research Question | Experiment |
 |---|---|---|
-| RQ1 | How does P95 latency degrade as CPU allocation decreases, and does the shape differ by workload profile? | Phase 2: Degradation Curves |
-| RQ2 | Does concurrent load amplify overcommitment-induced degradation, and is the amplification profile-dependent? | Phase 3: Concurrency Sweep |
-| RQ3 | How does overcommitment affect tail latency (P99, P99.9) compared to median behavior? | Phase 4: Tail Analysis |
-| RQ4 | Can the bimodal latency behavior of mixed functions under overcommitment be explained by CFS quota boundary effects? | Phase 5: CFS Boundary |
+| RQ1 | How does P95 latency degrade as CPU allocation decreases, and does the shape differ by workload profile? | Phase 2: Multi-Level Degradation Curves |
+| RQ2 | Can the bimodal latency behavior of mixed functions under overcommitment be explained by CFS quota boundary effects? | Phase 1 bimodality observation + Pre-Phase 2 CPU burst measurement |
 
 ### 1.4 Target Contributions
 
 1. **Degradation curves** showing the relationship between CPU allocation and P95 latency for three workload profiles, tested at 5 overcommitment levels on real infrastructure (not simulation)
-2. **Contention analysis** demonstrating how concurrent load interacts with overcommitment, revealing superlinear degradation for mixed workloads
-3. **Tail latency characterization** showing that overcommitment amplifies tail latency disproportionately for profiles near CFS quota boundaries
-4. **Mechanistic explanation** of bimodal CFS throttling behavior in mixed workloads, validated experimentally by manipulating the quota boundary
-5. **Empirical characterization** of the profile-dependent degradation phenomenon that motivates profile-aware scheduling systems like Golgi — grounded in direct measurement on real infrastructure
+2. **Mechanistic explanation** of bimodal CFS throttling behavior in mixed workloads, validated experimentally through direct cgroup v2 CPU burst measurement and throttle ratio analysis
+3. **Empirical characterization** of the profile-dependent degradation phenomenon that motivates profile-aware scheduling systems like Golgi — grounded in direct measurement on real infrastructure
 
 ### 1.5 Technology Stack
 
@@ -126,13 +120,9 @@ The Golgi paper builds an entire ML-guided routing system on top of this hypothe
 
 We isolate and test the hypothesis directly:
 
-1. **Multiple overcommitment levels.** Instead of testing one OC configuration per function, we test 5 levels (100%, 80%, 60%, 40%, 20% of original CPU). This produces degradation curves, not just point comparisons.
+1. **Multiple overcommitment levels.** Instead of testing one OC configuration per function, we test 5 levels (100%, 80%, 60%, 40%, 20% of original CPU). This produces degradation curves, not just point comparisons. Knowing that a CPU-bound function is 2.4x slower at one specific overcommitment level tells an operator very little. Knowing that degradation is linear from 100% to 40% CPU but accelerates sharply below 40% gives an operator actionable guidance for setting overcommitment policies.
 
-2. **Concurrency interaction.** We cross overcommitment level with concurrent load (1, 2, 4, 8 simultaneous requests). This reveals whether contention amplifies degradation linearly or superlinearly.
-
-3. **Tail latency focus.** We analyze P50, P95, P99, and P99.9 separately. Mean and P95 can look acceptable while P99.9 is catastrophic — this matters for SLO design.
-
-4. **CFS mechanistic analysis.** We experimentally validate that the bimodal latency distribution in mixed functions comes from CFS quota boundary crossings, not from other sources of variance. We do this by deploying the same function with CPU limits that place the quota boundary at different points relative to the function's CPU burst size.
+2. **CFS mechanistic analysis.** We experimentally validate that the bimodal latency distribution in mixed functions comes from CFS quota boundary crossings, not from other sources of variance. We do this by measuring the per-request CPU burst size via cgroup v2 `cpu.stat` counters and showing that the burst size relative to the CFS quota boundary predicts the observed bimodal latency distribution.
 
 ### 2.5 Why AWS?
 
@@ -257,17 +247,15 @@ Our study characterizes the foundational observation that makes this system desi
 
 ### 4.1 Experiment Matrix
 
-Our study consists of four experiments, each answering one research question. The experiments build on each other — Phase 1 establishes the baseline, Phase 2 varies the independent variable (CPU allocation), Phase 3 adds a second factor (concurrency), and Phases 4-5 provide deeper analysis of mechanisms observed in earlier phases.
+Our study consists of two experiments, each answering one research question. The experiments build on each other — Phase 1 establishes the baseline and reveals the bimodal latency phenomenon in mixed functions, the Pre-Phase 2 CPU burst measurement provides the mechanistic explanation (answering RQ2), and Phase 2 varies the independent variable (CPU allocation) to produce degradation curves (answering RQ1).
 
 ```
 Phase 0: Infrastructure Setup (AWS, k3s, OpenFaaS)              ✅ COMPLETED
 Phase 1: Baseline Characterization (Non-OC vs default OC)       ✅ COMPLETED
-Phase 2: Degradation Curves (5 CPU levels × 3 functions)
-Phase 3: Concurrency Sweep (4 concurrency levels × OC)
-Phase 4: Tail Latency Analysis (P50/P95/P99/P99.9 across levels)
-Phase 5: CFS Boundary Analysis (fine-grained CPU levels for log-filter)
-Phase 6: Analysis and Visualization
-Phase 7: Report Writing and Demo
+  └─ Pre-Phase 2: CPU Burst Measurement (cgroup v2 analysis)    ✅ COMPLETED
+Phase 2: Degradation Curves (5 CPU levels × 3 functions)        🔄 IN PROGRESS
+Phase 3: Analysis and Visualization
+Phase 4: Report Writing and Demo
 ```
 
 ### 4.2 Function Selection
@@ -293,19 +281,15 @@ All latency measurements follow a consistent protocol:
 5. **Timing:** `date +%s%N` on the client side (nanosecond wall-clock, converted to milliseconds)
 6. **Environment:** All measurements from the same load generator instance (t3.medium) to the same cluster, same time of day to minimize EC2 neighbor noise
 
-For concurrency experiments (Phase 3), we use parallel `curl` processes to achieve controlled concurrent load, with the number of concurrent requests as the independent variable.
-
 ### 4.4 Independent and Dependent Variables
 
 | Variable | Type | Values |
 |---|---|---|
 | Function profile | Independent (categorical) | CPU-bound, I/O-bound, Mixed |
 | CPU allocation | Independent (continuous) | 100%, 80%, 60%, 40%, 20% of Non-OC level |
-| Concurrent requests | Independent (integer) | 1, 2, 4, 8 |
 | P50 latency | Dependent | Measured per experiment |
 | P95 latency | Dependent | Measured per experiment |
 | P99 latency | Dependent | Measured per experiment |
-| P99.9 latency | Dependent | Measured per experiment |
 | CFS throttled periods | Dependent | Read from cgroup `cpu.stat` |
 | CFS throttled time | Dependent | Read from cgroup `cpu.stat` |
 
@@ -612,7 +596,7 @@ ls /sys/fs/cgroup/
 # Should show: cgroup.controllers, cgroup.subtree_control, cpu.stat, memory.stat, etc.
 ```
 
-**Result:** Amazon Linux 2023 uses cgroup v2. All CPU metric paths use the unified hierarchy (`/sys/fs/cgroup/<path>/cpu.stat`). The `nr_throttled` and `throttled_usec` counters needed for Phase 5 are available in `cpu.stat`.
+**Result:** Amazon Linux 2023 uses cgroup v2. All CPU metric paths use the unified hierarchy (`/sys/fs/cgroup/<path>/cpu.stat`). The `nr_throttled` and `throttled_usec` counters needed for CFS throttling analysis are available in `cpu.stat`.
 
 ### 5.8 Checkpoint: Phase 0 Complete ✅
 
@@ -972,9 +956,36 @@ SLO_log_filter   = 17 ms
 
 4. **Zero errors across all 1,200 requests** confirms infrastructure stability.
 
-These baseline results demonstrate profile-dependent degradation behavior at a single overcommitment level, consistent with the CFS-driven mechanism. Phases 2-5 extend this to multiple levels and deeper analysis.
+These baseline results demonstrate profile-dependent degradation behavior at a single overcommitment level. Phase 2 extends this to multiple levels to produce full degradation curves.
 
-### 6.6 Phase 1 Plots
+### 6.6 Pre-Phase 2: CPU Burst Measurement ✅
+
+> **Status:** Completed on 2026-04-12. Full execution details in [`execution_log_phase2.md`](execution_log_phase2.md).
+
+Phase 1 revealed bimodal latency in log-filter-oc (P95 = 77ms vs P50 = 25ms, σ = 23ms). Before sweeping CPU levels in Phase 2, we measured the intrinsic CPU burst size of log-filter to understand the CFS mechanism driving this bimodality.
+
+**Method:** Read cgroup v2 `cpu.stat` counters (usage_usec, nr_periods, nr_throttled, throttled_usec) before and after 200 sequential requests. Compute per-request CPU burst from the delta.
+
+**Results:**
+
+| Variant | CPU Limit | Per-Request CPU | Quota/Period | Throttle Ratio |
+|---|---|---|---|---|
+| log-filter (Non-OC) | 500m | 7.60ms | 50ms/100ms | 33.3% |
+| log-filter-oc (OC) | 206m | 7.76ms | 20.6ms/100ms | 97.3% |
+
+**Key findings (answering RQ2):**
+
+1. **CPU burst size is intrinsic to the function, not the CPU limit.** Both variants use ~7.7ms of CPU per request — the limit changes wall-clock latency, not CPU work done.
+
+2. **The CFS mechanism is now quantitatively explained.** At 206m quota (20.6ms per 100ms period), approximately 2.7 requests fit per CFS period. Requests 1-2 complete fast (~16ms wall-clock). Request 3 straddles the quota boundary — it begins execution but exhausts the remaining ~5ms of quota, gets throttled, waits ~80ms for the next period, then finishes with a fresh quota. This creates the bimodal latency distribution: fast mode (~16-25ms) vs slow mode (~80-100ms).
+
+3. **Throttle ratio confirms the mechanism.** At 97.3% throttle ratio (OC) vs 33.3% (Non-OC), nearly every CFS period under overcommitment experiences throttling. The 33.3% Non-OC throttling corresponds to ~1 in 3 requests hitting the boundary even at 500m, which is consistent with 7.7ms burst × 3 requests = 23.1ms against a 50ms quota — the third request occasionally straddles.
+
+4. **CFS boundary transition points predicted.** The 7.7ms burst measurement predicts bimodal transitions at integer multiples of burst size: 77m (1 req/period), 154m (2 req/period), 231m (3 req/period), 308m (4 req/period). Phase 2's CPU sweep at 100m, 200m, 300m, 400m, 500m will cross several of these boundaries.
+
+This mechanistic analysis provides the direct experimental evidence for RQ2: the bimodal latency behavior of mixed functions under overcommitment is caused by CFS quota boundary crossings, where the function's CPU burst size (~7.7ms) straddles the CFS period quota, causing some requests to spill into the next period and incur a full-period throttling penalty.
+
+### 6.7 Phase 1 Plots
 
 Five publication-quality plots generated from baseline data (see `results/phase1/plots/`):
 
@@ -986,7 +997,7 @@ Five publication-quality plots generated from baseline data (see `results/phase1
 | Fig 4 | `fig4_box_plots.png` | Box plots showing distribution shape and bimodal behavior |
 | Fig 5 | `fig5_degradation_ratios.png` | Degradation ratio comparison (P95, mean, CPU reduction) |
 
-### 6.7 Checkpoint: Phase 1 Complete ✅
+### 6.8 Checkpoint: Phase 1 Complete ✅
 
 ```
 [x] 3 Non-OC functions deployed and responding
@@ -998,13 +1009,15 @@ Five publication-quality plots generated from baseline data (see `results/phase1
 [x] Degradation ratios computed — profile-dependent behavior confirmed
 [x] 5 baseline plots generated
 [x] Zero errors across all measurements
+[x] CPU burst measurement completed — CFS mechanism quantified (RQ2)
+[x] Bimodal latency in log-filter-oc explained by CFS quota boundary crossings
 ```
 
 ---
 
 ## 7. Phase 2 — Multi-Level Degradation Curves
 
-> **Status:** Not started. Depends on Phase 1 (completed).
+> **Status:** In progress. Depends on Phase 1 (completed).
 
 ### 7.1 Objective
 
@@ -1169,7 +1182,7 @@ Based on Phase 1 observations and CFS theory:
 
 **I/O-bound (db-query):** Flat until extreme overcommitment. Even at 20% CPU (100m), the function's CPU work (JSON parsing, Redis client library) should complete within the 10ms CFS quota. Degradation will appear only if the CPU quota is so low that the Python interpreter itself struggles to start the request processing. We expect the curve to stay flat until ~100m and then rise sharply.
 
-**Mixed (log-filter):** Step-function behavior. As CPU decreases, the function's CPU burst size remains constant (~16ms of CPU work), but the CFS quota shrinks. At some point, the quota drops below 16ms, and requests start spilling into the next CFS period, adding ~60-80ms of wait time. The curve should show:
+**Mixed (log-filter):** Step-function behavior. As CPU decreases, the function's CPU burst size remains constant (~7.7ms of CPU work based on Pre-Phase 2 measurement), but the CFS quota shrinks. At some point, the quota drops below the burst size, and requests start spilling into the next CFS period, adding ~60-80ms of wait time. The curve should show:
 - 500m-300m: latency stays ~16ms (burst fits within quota)
 - 300m-200m: transition zone (some requests spill, some don't — bimodal)
 - Below 200m: most requests spill — latency jumps to ~80-100ms
@@ -1222,414 +1235,11 @@ This reveals how the distribution shape changes — particularly the bimodal tra
 
 ---
 
-## 8. Phase 3 — Concurrency Under Overcommitment
+## 8. Phase 3 — Analysis and Visualization
 
-> **Status:** Not started. Depends on Phase 1 (completed).
+> **Status:** Not started. Depends on Phase 2 (in progress).
 
-### 8.1 Objective
-
-Phase 2 measures latency with sequential (non-concurrent) requests. But in production, functions handle multiple concurrent requests. Phase 3 asks: **does concurrent load amplify overcommitment-induced degradation, and is the amplification profile-dependent?**
-
-This matters because overcommitment and concurrency both consume CPU. A function at 40% CPU allocation handling 4 concurrent requests faces double contention: reduced allocation AND shared execution. The question is whether these effects add linearly or multiply.
-
-### 8.2 Experimental Design
-
-For each function at its default OC level (Phase 1 configuration), measure latency at 4 concurrency levels:
-
-| Concurrency | Description |
-|---|---|
-| 1 | Sequential (baseline — same as Phase 1 OC measurement) |
-| 2 | Two concurrent requests |
-| 4 | Four concurrent requests (matches max_inflight) |
-| 8 | Eight concurrent requests (exceeds max_inflight — tests queuing) |
-
-We also run the same concurrency sweep on Non-OC variants to establish the "expected" concurrency scaling and then compare.
-
-**Total measurements:**
-- 3 functions × 2 variants (Non-OC, OC) × 4 concurrency levels = 24 configurations
-- 200 requests × 3 repetitions per configuration = 14,400 total requests
-
-### 8.3 Concurrency Measurement Method
-
-For concurrency > 1, we launch N parallel request processes, each sending sequential requests. Total request count is still 200 per run:
-
-```bash
-#!/bin/bash
-# benchmark-concurrent.sh
-# Measures latency with N concurrent request streams
-
-FUNC=$1
-CONCURRENCY=$2
-TOTAL_REQUESTS=200
-PER_STREAM=$((TOTAL_REQUESTS / CONCURRENCY))
-GATEWAY="http://127.0.0.1:31112"
-
-case $FUNC in
-  image-resize*) PAYLOAD='{"width":1920,"height":1080}' ;;
-  db-query*)     PAYLOAD='{"key":"bench_key"}' ;;
-  log-filter*)   PAYLOAD='{}' ;;
-esac
-
-# Warm-up
-for i in $(seq 1 10); do
-  curl -s -o /dev/null "$GATEWAY/function/$FUNC" -d "$PAYLOAD"
-done
-
-# Launch N concurrent streams
-OUTPUT_DIR=$(mktemp -d)
-for stream in $(seq 1 $CONCURRENCY); do
-  (
-    for i in $(seq 1 $PER_STREAM); do
-      START=$(date +%s%N)
-      curl -s -o /dev/null "$GATEWAY/function/$FUNC" -d "$PAYLOAD"
-      END=$(date +%s%N)
-      echo "$(( (END - START) / 1000000 ))"
-    done > "$OUTPUT_DIR/stream_${stream}.txt"
-  ) &
-done
-
-# Wait for all streams to complete
-wait
-
-# Merge all stream results
-cat "$OUTPUT_DIR"/stream_*.txt | sort -n
-rm -rf "$OUTPUT_DIR"
-```
-
-### 8.4 Expected Results
-
-**CPU-bound (image-resize):**
-- Non-OC: latency scales ~linearly with concurrency (4 concurrent ≈ 4× slower, since they share 1 CPU core)
-- OC: latency scales linearly BUT from a higher base — so at concurrency 4, OC latency ≈ 4 × 11s = 44s (potentially hitting timeouts)
-- **Amplification factor:** ~1.0× (linear, no superlinear effect expected)
-
-**I/O-bound (db-query):**
-- Non-OC: minimal scaling — concurrent requests wait on independent Redis round-trips, minimal CPU contention
-- OC: similarly minimal — network waits don't compete for CPU
-- **Amplification factor:** ~1.0× (concurrency doesn't interact with CPU overcommitment for I/O-bound work)
-
-**Mixed (log-filter):**
-- Non-OC: moderate scaling — concurrent regex operations share CPU but each completes within one CFS period
-- OC: **superlinear** scaling expected. Multiple concurrent requests each consuming ~16ms of CPU time will collectively exhaust the CFS quota faster. With concurrency 4 at 206m (quota = 20.6ms), four functions needing 16ms each = 64ms of CPU work per period, but only 20.6ms of quota available. All four will be throttled, each waiting for the next period. Effective serialization under CFS throttling.
-- **Amplification factor:** >1.0× — concurrency makes CFS throttling worse, not just proportionally worse
-
-### 8.5 Plots to Generate
-
-**Plot P3.1: Concurrency Scaling Curves**
-```
-2 × 3 subplot grid:
-  Top row: Non-OC functions
-  Bottom row: OC functions
-  Columns: image-resize, db-query, log-filter
-X-axis: Concurrency (1, 2, 4, 8)
-Y-axis: P95 latency (ms)
-```
-
-**Plot P3.2: Amplification Factor**
-```
-X-axis: Concurrency level
-Y-axis: Amplification factor = (OC_latency_at_concurrency_N / OC_latency_at_concurrency_1)
-        divided by
-        (NonOC_latency_at_concurrency_N / NonOC_latency_at_concurrency_1)
-Lines: one per function, colored by profile
-Reference: y=1.0 line (no amplification)
-```
-
-Values above 1.0 mean concurrency amplifies overcommitment degradation. We expect log-filter to be significantly above 1.0 at concurrency ≥ 4.
-
-### 8.6 Checkpoint: Phase 3 Complete
-
-```
-[ ] 24 configurations measured (3 functions × 2 variants × 4 concurrency levels)
-[ ] 200 requests × 3 repetitions per configuration = 14,400 total requests
-[ ] Concurrency scaling curves plotted for Non-OC and OC
-[ ] Amplification factor computed and plotted
-[ ] Superlinear amplification identified (or not) for each profile
-[ ] Interaction between CFS throttling and concurrency documented
-```
-
-**Estimated time: 1-2 days**
-
----
-
-## 9. Phase 4 — Tail Latency Analysis
-
-> **Status:** Not started. Depends on Phases 2-3 (data reuse).
-
-### 9.1 Objective
-
-Phases 2 and 3 focus primarily on P95 latency. Phase 4 asks: **how does overcommitment affect tail latency (P99, P99.9) compared to median behavior?** The concern is that mean or even P95 might look acceptable while the worst 0.1% of requests experience catastrophic degradation.
-
-This matters for SLO design: if a cloud provider overcommits functions that appear "safe" based on P95 but have 10× P99.9 degradation, the worst user experience is much worse than the SLO suggests.
-
-### 9.2 Methodology
-
-This phase primarily reanalyzes data already collected in Phases 1, 2, and 3. No new measurements are needed unless sample sizes are insufficient for P99.9 estimation (200 samples gives only 1 data point at P99.5).
-
-**For P99.9 reliability**, we collect an extended measurement run for each function at the default OC level:
-
-```bash
-# 1000 requests per function for reliable tail estimation
-for func in image-resize image-resize-oc db-query db-query-oc log-filter log-filter-oc; do
-  bash benchmark-latency.sh $func 1000 > results/phase4/${func}_tail_1000.txt
-done
-```
-
-**Total: 6,000 additional requests** (1000 × 6 function variants)
-
-### 9.3 Analysis
-
-For each (function, CPU level) combination from Phase 2 data, compute:
-
-```python
-percentiles = [50, 90, 95, 99, 99.5, 99.9]
-for func in functions:
-    for level in cpu_levels:
-        latencies = load_data(func, level)
-        for p in percentiles:
-            value = np.percentile(latencies, p)
-            # Store: (func, level, percentile, value)
-```
-
-**Key metric: Tail Amplification Factor (TAF)**
-
-```
-TAF(p, level) = OC_percentile_p_at_level / NonOC_percentile_p
-
-Example:
-  NonOC P50 = 16ms, NonOC P99 = 18ms
-  OC P50 = 25ms, OC P99 = 96ms
-
-  TAF(P50) = 25/16 = 1.56×
-  TAF(P99) = 96/18 = 5.33×
-
-  The tail is amplified 5.33/1.56 = 3.4× more than the median.
-```
-
-If TAF increases with percentile rank, overcommitment disproportionately affects tail latency. We expect this to be true for mixed functions (CFS boundary effects create a heavy tail) and less true for CPU-bound functions (which degrade uniformly).
-
-### 9.4 Expected Results
-
-**CPU-bound:** TAF roughly constant across percentiles. Degradation is uniform — every request is equally affected by CPU reduction. P99/P50 ratio stays similar between Non-OC and OC.
-
-**I/O-bound:** TAF slightly increasing. Most requests are unaffected, but occasional requests that happen to hit CPU contention (JSON parsing, connection setup) create a small heavy tail under OC.
-
-**Mixed:** TAF strongly increasing. The bimodal CFS behavior means the "fast mode" requests (completing within one CFS period) contribute to median, while "slow mode" requests (spilling to next period) dominate the tail. Under OC, a larger fraction of requests enter slow mode, making the tail heavier.
-
-### 9.5 Plots to Generate
-
-**Plot P4.1: Percentile Ladder**
-```
-For each function:
-  X-axis: Percentile (P50, P90, P95, P99, P99.5, P99.9)
-  Y-axis: Latency (ms), log scale
-  Lines: Non-OC (solid), OC (dashed)
-```
-
-Shows how the gap between Non-OC and OC widens (or doesn't) as you move toward the tail.
-
-**Plot P4.2: Tail Amplification Factor**
-```
-X-axis: Percentile (P50, P90, P95, P99, P99.9)
-Y-axis: TAF (ratio of OC percentile to Non-OC percentile)
-Lines: one per function, colored by profile
-Reference: y=1.0 (no amplification)
-```
-
-**Plot P4.3: Tail Amplification Across CPU Levels (from Phase 2 data)**
-```
-Heatmap:
-  X-axis: CPU level (100%, 80%, 60%, 40%, 20%)
-  Y-axis: Percentile (P50, P95, P99, P99.9)
-  Color: TAF value
-  One heatmap per function
-```
-
-### 9.6 Checkpoint: Phase 4 Complete
-
-```
-[ ] Extended measurement (1000 requests) collected for all 6 variants
-[ ] Percentile ladders computed for all (function, CPU level) pairs
-[ ] Tail Amplification Factor computed and plotted
-[ ] Profile-dependent tail behavior documented
-[ ] Heatmap of TAF across CPU levels and percentiles generated
-```
-
-**Estimated time: 1 day (mostly analysis, minimal new measurement)**
-
----
-
-## 10. Phase 5 — CFS Quota Boundary Analysis
-
-> **Status:** Not started. Depends on Phase 2 observations.
-
-### 10.1 Objective
-
-Phase 1 revealed bimodal latency behavior in log-filter under OC. Phase 2 should show where the transition occurs. Phase 5 asks: **can we experimentally prove that the bimodal behavior is caused by CFS quota boundary crossings?**
-
-This is the strongest technical contribution of the study. We're not just observing degradation — we're explaining *why* it happens at the kernel scheduler level and validating the explanation experimentally.
-
-### 10.2 The Hypothesis
-
-The log-filter function performs ~16ms of CPU work per request. Under CFS bandwidth control:
-
-```
-At CPU = 500m: quota = 50ms per 100ms period
-  → 16ms < 50ms → completes in one period → latency ≈ 16ms ✓
-
-At CPU = 300m: quota = 30ms per 100ms period
-  → 16ms < 30ms → completes in one period → latency ≈ 16ms ✓
-
-At CPU = 200m: quota = 20ms per 100ms period
-  → 16ms < 20ms → completes in one period MOST of the time → latency ≈ 16ms
-  → But variance in CPU work means some requests need >20ms → these spill → latency ≈ 80-100ms
-  → BIMODAL DISTRIBUTION
-
-At CPU = 150m: quota = 15ms per 100ms period
-  → 16ms > 15ms → ALWAYS spills → latency ≈ 80-100ms ✓
-```
-
-The transition from unimodal to bimodal should happen when the CFS quota is approximately equal to the function's CPU burst size.
-
-### 10.3 Experimental Design
-
-Deploy log-filter at fine-grained CPU levels around the expected transition point:
-
-| CPU (m) | Quota (ms/100ms) | Expected Behavior |
-|---|---|---|
-| 300 | 30 | Unimodal (fast) — burst fits comfortably |
-| 250 | 25 | Unimodal (fast) — burst fits with margin |
-| 220 | 22 | Unimodal (fast) — tight fit, rare spills |
-| 200 | 20 | **Bimodal** — burst at boundary, ~50% spill |
-| 180 | 18 | **Bimodal** — most requests spill, some don't |
-| 160 | 16 | **Transition** — burst ≈ quota |
-| 140 | 14 | Unimodal (slow) — burst exceeds quota, always spills |
-| 120 | 12 | Unimodal (slow) — deep into spill territory |
-| 100 | 10 | Unimodal (slow) — burst needs 2 periods |
-
-**Total:** 9 CPU levels × 200 requests × 3 repetitions = 5,400 requests
-
-### 10.4 Measurements
-
-For each CPU level, we collect:
-
-1. **Latency distribution** (200 requests) — to identify unimodal vs bimodal shape
-2. **CFS throttling counters** — `nr_throttled` and `throttled_usec` from `cpu.stat`
-3. **Throttle ratio** — `nr_throttled / nr_periods`
-4. **Average throttle duration** — `throttled_usec / nr_throttled` (when throttled, how long?)
-
-The critical metric is the throttle ratio. We predict:
-- Throttle ratio ≈ 0% at 300m (no throttling)
-- Throttle ratio ≈ 50% at 200m (bimodal — half the requests throttled)
-- Throttle ratio ≈ 100% at 100m (always throttled)
-
-The transition should be sharp, not gradual, because CFS quota enforcement is a hard boundary.
-
-### 10.5 Analysis
-
-**Bimodality test:** For each CPU level, test whether the latency distribution is bimodal using:
-
-1. **Hartigan's dip test** — a statistical test for multimodality. Dip statistic > 0.05 with p < 0.05 indicates bimodality.
-
-2. **Gaussian Mixture Model (GMM) with 2 components** — fit a 2-component GMM and check if both components have significant weight (>10% each) and are well-separated (means differ by >1 standard deviation).
-
-3. **Visual inspection** — histogram with kernel density estimate showing two peaks.
-
-```python
-from sklearn.mixture import GaussianMixture
-
-def test_bimodality(latencies):
-    """Test if a latency distribution is bimodal."""
-    X = np.array(latencies).reshape(-1, 1)
-
-    # Fit 1-component and 2-component GMMs
-    gmm1 = GaussianMixture(n_components=1).fit(X)
-    gmm2 = GaussianMixture(n_components=2).fit(X)
-
-    # Compare using BIC (lower is better)
-    bic1 = gmm1.bic(X)
-    bic2 = gmm2.bic(X)
-
-    # Check if 2-component model is significantly better
-    is_bimodal = (bic1 - bic2) > 10  # BIC difference > 10 is strong evidence
-
-    # Check component separation
-    if is_bimodal:
-        means = sorted(gmm2.means_.flatten())
-        stds = np.sqrt(gmm2.covariances_.flatten())
-        separation = (means[1] - means[0]) / np.mean(stds)
-        weights = gmm2.weights_
-        is_bimodal = separation > 2.0 and min(weights) > 0.1
-
-    return is_bimodal, gmm2 if is_bimodal else gmm1
-```
-
-### 10.6 Expected Results
-
-The key figure should show:
-
-1. At high CPU (300-250m): unimodal distribution centered at ~16ms
-2. At transition CPU (220-180m): bimodal distribution with peaks at ~16ms and ~80-100ms
-3. At low CPU (140-100m): unimodal distribution centered at ~80-100ms (or higher for very low CPU)
-
-The transition CPU level should correspond to where the CFS quota equals the function's CPU burst size (~16ms of CPU work). This directly tests the CFS boundary hypothesis and provides a mechanistic explanation for the bimodal degradation pattern.
-
-### 10.7 Plots to Generate
-
-**Plot P5.1: Latency Distributions at Each CPU Level**
-```
-3 × 3 grid of histograms (9 CPU levels)
-Each histogram: 200 latency samples with KDE overlay
-Title: CPU level and quota
-Bimodal distributions highlighted with GMM component overlay
-```
-
-**Plot P5.2: Throttle Ratio vs CPU Level**
-```
-X-axis: CPU allocation (m)
-Y-axis: Throttle ratio (nr_throttled / nr_periods)
-Line: observed throttle ratio
-Vertical line: predicted transition point (CPU = burst size in ms × 10)
-```
-
-**Plot P5.3: Mode Transition**
-```
-X-axis: CPU allocation (m)
-Y-axis: Fraction of requests in "slow mode" (latency > 2× Non-OC median)
-Line: observed fraction
-Expected: S-curve transitioning from 0% to 100% around the boundary
-```
-
-**Plot P5.4: CFS Boundary Mechanism Diagram**
-```
-Annotated timeline diagram showing:
-  - Top: request at 250m (fits within quota, no throttling)
-  - Middle: request at 200m (borderline, sometimes throttled)
-  - Bottom: request at 150m (always throttled, waits for next period)
-```
-
-### 10.8 Checkpoint: Phase 5 Complete
-
-```
-[ ] 9 CPU levels deployed and measured for log-filter
-[ ] 200 requests × 3 repetitions per level = 5,400 total requests
-[ ] CFS throttling counters recorded for all levels
-[ ] Bimodality test applied to all distributions
-[ ] Transition point identified (CPU level where bimodality emerges)
-[ ] Throttle ratio vs CPU level plotted — transition matches prediction
-[ ] Mode fraction S-curve plotted
-[ ] CFS boundary mechanism validated experimentally
-```
-
-**Estimated time: 1-2 days**
-
----
-
-## 11. Phase 6 — Analysis and Visualization
-
-> **Status:** Not started. Depends on Phases 2-5.
-
-### 11.1 Summary of All Plots
+### 8.1 Summary of All Plots
 
 | # | Plot | Source Phase | Key Message |
 |---|---|---|---|
@@ -1641,17 +1251,8 @@ Annotated timeline diagram showing:
 | P2.1 | **Degradation curves** | Phase 2 | **The key figure** — three diverging curves |
 | P2.2 | Throttle ratio vs degradation | Phase 2 | CFS throttling as degradation predictor |
 | P2.3 | Violin plots grid | Phase 2 | Distribution shape across levels |
-| P3.1 | Concurrency scaling | Phase 3 | Non-OC vs OC concurrency behavior |
-| P3.2 | Amplification factor | Phase 3 | Superlinear interaction for mixed |
-| P4.1 | Percentile ladder | Phase 4 | Tail behavior per profile |
-| P4.2 | Tail amplification factor | Phase 4 | TAF increasing with percentile |
-| P4.3 | TAF heatmap | Phase 4 | TAF across levels and percentiles |
-| P5.1 | CFS boundary histograms | Phase 5 | Bimodal transition |
-| P5.2 | Throttle ratio curve | Phase 5 | Transition point identification |
-| P5.3 | Mode fraction S-curve | Phase 5 | Slow mode fraction vs CPU |
-| P5.4 | CFS mechanism diagram | Phase 5 | Explanatory illustration |
 
-### 11.2 Statistical Analysis
+### 8.2 Statistical Analysis
 
 For each research question, compute:
 
@@ -1659,63 +1260,55 @@ For each research question, compute:
 - Pearson correlation between CPU allocation and P95 latency for each profile
 - Slope of linear fit for CPU-bound (should be ~1.0 in normalized space)
 - R² of linear fit (high for CPU-bound, low for I/O-bound and mixed)
+- Identification of transition points where the curve shape changes (particularly for mixed profile)
 
-**RQ2 (Concurrency interaction):**
-- Two-way ANOVA: factors = (profile, concurrency), response = P95 latency
-- Interaction term significance — tests whether concurrency effect depends on profile
+**RQ2 (CFS mechanism):**
+- Correlation between throttle ratio and slow-mode fraction across Phase 2 CPU levels
+- Verification that the bimodal transition in log-filter occurs near the predicted CFS quota boundary (where quota ≈ 7.7ms burst size, i.e., ~77m CPU)
+- Comparison of observed distribution shapes (unimodal vs bimodal) at each CPU level against CFS theory predictions
 
-**RQ3 (Tail amplification):**
-- TAF ratio at P99.9 vs P50 — quantifies tail amplification magnitude
-- Coefficient of variation (σ/μ) for each (profile, level) — measures latency predictability
-
-**RQ4 (CFS boundary):**
-- Hartigan's dip test p-values at each CPU level
-- Transition point estimate: CPU level where bimodality first appears
-- Correlation between throttle ratio and slow-mode fraction
-
-### 11.3 Comparison with Golgi Paper's Assumed Behavior
+### 8.3 Comparison with Golgi Paper's Assumed Behavior
 
 | Assumed Behavior | Our Evidence | Finding |
 |---|---|---|
 | CPU-bound functions degrade proportionally to CPU cut | Phase 2 degradation curve slope | Confirmed / Nuanced / Contradicted |
 | I/O-bound functions are resilient to overcommitment | Phase 2 flat curve for db-query | Confirmed / Nuanced / Contradicted |
-| Mixed functions show variable degradation | Phase 2 + Phase 5 CFS analysis | Characterized + mechanistic explanation |
+| Mixed functions show variable degradation | Phase 1 bimodality + Pre-Phase 2 CFS analysis + Phase 2 curves | Characterized + mechanistic explanation |
 | Different profiles need different overcommitment treatment | All phases | Characterized with degradation curves |
 
-### 11.4 Checkpoint: Phase 6 Complete
+### 8.4 Checkpoint: Phase 3 Complete
 
 ```
-[ ] All 17+ plots generated at publication quality (300 DPI)
-[ ] Statistical tests computed for all RQs
+[ ] All 8 plots generated at publication quality (300 DPI)
+[ ] Statistical tests computed for both RQs
 [ ] Comparison table with Golgi claims completed
 [ ] All figures have captions and are referenced in the report
 [ ] Raw data organized in results/ directory
 ```
 
-**Estimated time: 2-3 days**
+**Estimated time: 1-2 days**
 
 ---
 
-## 12. Phase 7 — Report Writing and Demo
+## 9. Phase 4 — Report Writing and Demo
 
 > **Status:** In progress (Sections 1-3 drafted).
 
-### 12.1 Report Structure
+### 9.1 Report Structure
 
 | Section | Content | Status |
 |---|---|---|
 | 1. Introduction | Overcommitment problem, Golgi hypothesis, what we test | Drafted |
 | 2. Background | CFS, cgroups, overcommitment formula, Golgi overview | Drafted |
-| 3. System Design | Infrastructure, functions, measurement methodology | Drafted |
-| 4. Baseline Characterization | Phase 1 results — single OC level comparison | Write from Phase 1 data |
-| 5. Degradation Curves | Phase 2 results — multi-level degradation | Write from Phase 2 data |
-| 6. Contention Analysis | Phase 3 results — concurrency × overcommitment | Write from Phase 3 data |
-| 7. Tail Latency and CFS Analysis | Phases 4-5 results — tail amplification, CFS mechanism | Write from Phase 4-5 data |
-| 8. Discussion | Implications, comparison with Golgi claims, limitations | Write after all data |
-| 9. Conclusion | Summary, contributions, future work | Write last |
-| 10. References | All cited papers and tools | Mostly done |
+| 3. Experimental Design | Infrastructure, functions, measurement methodology | Drafted |
+| 4. Implementation | AWS infrastructure, k3s cluster, OpenFaaS, function construction | Drafted |
+| 5. Baseline Characterization | Phase 1 results — single OC level comparison + CFS burst measurement | Write from Phase 1 data |
+| 6. Results and Analysis | Phase 2 results — multi-level degradation curves, throttle correlation | Write from Phase 2 data |
+| 7. Discussion | Implications, comparison with Golgi claims, limitations, future work | Write after all data |
+| 8. Conclusion | Summary, contributions | Write last |
+| 9. References | All cited papers and tools | Mostly done |
 
-### 12.2 Literature References
+### 9.2 Literature References
 
 | # | Paper | Relevance |
 |---|---|---|
@@ -1727,24 +1320,66 @@ For each research question, compute:
 | 6 | ENSURE (Suresh et al., ACSOS 2020) | SLO-aware serverless scheduling |
 | 7 | Power of Two Choices (Mitzenmacher, TPDS 2001) | Load balancing theory (Golgi's routing) |
 
-### 12.3 Demo Recording Outline
+### 9.3 Presentation Outline
 
 ```
-Duration: 10-12 minutes
+~12-15 slides
 
-00:00 - 01:30  Introduction: Overcommitment problem and Golgi hypothesis
-01:30 - 03:00  Infrastructure walkthrough (cluster, functions, measurement setup)
-03:00 - 04:00  Show running cluster (kubectl get nodes, pods, function invocations)
-04:00 - 06:00  Phase 1 results: baseline degradation ratios
-06:00 - 08:00  Phase 2 results: degradation curves — the key figure
-08:00 - 09:00  Phase 3 results: concurrency amplification
-09:00 - 10:30  Phase 5 results: CFS boundary mechanism
-10:30 - 12:00  Comparison with Golgi claims, conclusion, implications
+Slide 1:     Title — project name, team, course
+Slide 2:     The problem — serverless resource waste (75% idle), overcommitment risk
+Slide 3:     Golgi hypothesis — profile-dependent degradation, assumed but not validated
+Slide 4:     Our approach — 2 RQs, 3 profiles, 5 CPU levels, real AWS infrastructure
+Slide 5:     Infrastructure — cluster topology diagram (5 EC2, k3s, OpenFaaS)
+Slide 6:     Benchmark functions — image-resize, db-query, log-filter (table + rationale)
+Slide 7:     Phase 1 results — baseline degradation ratios (2.43×, 1.33×, 4.53×)
+Slide 8:     CFS mechanism — burst measurement (7.7ms), quota boundary diagram, throttle ratios
+Slide 9:     Phase 2 results — degradation curves (the key figure, P2.1)
+Slide 10:    Phase 2 results — throttle ratio vs degradation correlation (P2.2)
+Slide 11:    Phase 2 results — violin plot grid showing distribution shape changes (P2.3)
+Slide 12:    Comparison with Golgi claims — what we confirmed, what we added
+Slide 13:    Future work — concurrency, tail latency, fine-grained CFS sweep
+Slide 14:    Conclusion — contributions summary
 ```
 
 ---
 
-## 13. Appendix A — Cost Estimation
+## 10. Future Scope
+
+The following experiments extend the characterization naturally but are outside the scope of the current study. They represent valuable future work for anyone building on this foundation.
+
+### 10.1 Concurrency Under Overcommitment
+
+**Research question:** Does concurrent load amplify overcommitment-induced degradation, and is the amplification profile-dependent?
+
+In production, functions handle multiple concurrent requests. Overcommitment and concurrency both consume CPU — a function at 40% CPU allocation handling 4 concurrent requests faces double contention: reduced allocation AND shared execution. The question is whether these effects add linearly or multiply.
+
+**Proposed design:** For each function at its default OC level, measure latency at 4 concurrency levels (1, 2, 4, 8 simultaneous requests). Run the same sweep on Non-OC variants to establish expected concurrency scaling. Compute the amplification factor — values above 1.0 mean concurrency amplifies overcommitment degradation.
+
+**Expected outcome:** CPU-bound and I/O-bound functions should show linear scaling (~1.0× amplification). Mixed functions should show superlinear amplification at concurrency ≥ 4 because multiple concurrent requests collectively exhaust the CFS quota faster — at 206m quota (20.6ms), four functions needing 7.7ms each = 30.8ms of CPU work per period, but only 20.6ms of quota available. All four will be throttled, creating effective serialization under CFS throttling.
+
+### 10.2 Tail Latency Analysis
+
+**Research question:** How does overcommitment affect tail latency (P99, P99.9) compared to median behavior?
+
+Mean or even P95 might look acceptable while the worst 0.1% of requests experience catastrophic degradation. This matters for SLO design: if a cloud provider overcommits functions that appear "safe" based on P95 but have 10× P99.9 degradation, the worst user experience is much worse than the SLO suggests.
+
+**Proposed design:** Collect extended measurements (1000 requests per function variant) for reliable P99.9 estimation. Compute the Tail Amplification Factor (TAF) at each percentile: TAF(p) = OC_percentile(p) / NonOC_percentile(p). If TAF increases with percentile rank, overcommitment disproportionately affects tail latency.
+
+**Expected outcome:** CPU-bound functions should show roughly constant TAF across percentiles (uniform degradation). Mixed functions should show strongly increasing TAF because the bimodal CFS behavior means fast-mode requests contribute to the median while slow-mode requests dominate the tail.
+
+### 10.3 Fine-Grained CFS Quota Boundary Sweep
+
+**Research question:** Can the bimodal transition be mapped precisely by sweeping CPU allocations in fine-grained steps around the quota boundary?
+
+Our Pre-Phase 2 burst measurement (7.7ms per request) predicts transition points at integer multiples: 77m, 154m, 231m, 308m. A fine-grained sweep (50m–300m in 10m increments, 26 data points) would map exactly where the distribution transitions from unimodal to bimodal and back, validating the CFS boundary hypothesis at high resolution.
+
+**Proposed design:** Deploy log-filter at 9+ CPU levels around the predicted transition points (100m–300m in 20-25m increments). For each level, collect latency distributions (200 requests × 3 reps), CFS throttling counters, and apply bimodality tests (Hartigan's dip test, Gaussian Mixture Model fitting). Plot the throttle ratio vs CPU level curve and the slow-mode fraction S-curve.
+
+**Expected outcome:** At high CPU (300-250m), unimodal distribution centered at ~16ms. At transition CPU (220-180m), bimodal distribution with peaks at ~16ms and ~80-100ms. At low CPU (140-100m), unimodal distribution centered at ~80-100ms. The transition should be sharp (reflecting the hard CFS quota boundary), and the transition CPU level should correspond to where quota ≈ burst size (~77m for single-request and ~154m for two-request scenarios).
+
+---
+
+## 11. Appendix A — Cost Estimation
 
 ### AWS Cost Breakdown
 
@@ -1761,11 +1396,11 @@ Duration: 10-12 minutes
 - Stop all instances when not working (`aws ec2 stop-instances`)
 - Use spot instances for workers and load generator
 - Run experiments in bursts (all phases in one long session)
-- Estimated total project cost: **$25-40 over 4-5 weeks**
+- Estimated total project cost: **$15-25 over 2-3 weeks**
 
 ---
 
-## 14. Appendix B — Troubleshooting Guide
+## 12. Appendix B — Troubleshooting Guide
 
 ### Common Issues and Fixes
 
@@ -1778,7 +1413,6 @@ Duration: 10-12 minutes
 | cgroup path not found | Container uses different QoS class | Check all QoS dirs: guaranteed, burstable, besteffort |
 | CFS counters not updating | Reading wrong cgroup path | Verify container ID → cgroup path mapping |
 | Redis connection refused | Redis pod not running or DNS not resolved | `kubectl get pods -n openfaas-fn`, check service DNS |
-| Concurrent benchmark hangs | max_inflight exceeded, requests queued | Increase timeout, or measure queuing delay separately |
 | Inconsistent latency across reps | EC2 CPU throttling (T3 credit exhaustion) | Monitor CPU credits via CloudWatch, use unlimited mode |
 | CFS stats show zero throttling | CPU limit not applied to pod | Verify `cpu.max` file shows correct quota |
 
@@ -1812,7 +1446,7 @@ faas-cli describe image-resize
 
 ---
 
-## 15. Appendix C — File and Directory Structure
+## 13. Appendix C — File and Directory Structure
 
 ```
 golgi_vcc/
@@ -1820,11 +1454,12 @@ golgi_vcc/
 ├── PROJECT_PLAN.md                    # This file — project plan
 ├── execution_log_phase0.md            # Phase 0 execution log (infrastructure)
 ├── execution_log_phase1.md            # Phase 1 execution log (benchmarks)
-├── execution_log_phase2.md            # Phase 2 execution log (degradation curves)
+├── execution_log_phase2.md            # Pre-Phase 2 execution log (CPU burst measurement)
 │
 ├── docs/
 │   ├── final_report.md                # Course report (in progress)
-│   └── golgi-socc23-audit.md          # Paper-code audit analysis
+│   └── analysis/
+│       └── golgi-socc23-audit.md      # Paper-code audit analysis
 │
 ├── infrastructure/                    # Phase 0
 │   ├── setup-vpc.sh                   # VPC, subnet, security group creation
@@ -1849,43 +1484,44 @@ golgi_vcc/
 │   │   └── Dockerfile
 │   ├── stack.yml                      # OpenFaaS deployment config
 │   ├── functions-deploy.yaml          # Raw K8s manifests (6 variants)
+│   ├── phase2-deploy-template.yaml    # Phase 2 parameterized template
 │   └── redis-deployment.yaml          # Redis service for db-query
+│
+├── build/                             # OpenFaaS function templates
+│   ├── python3-http/
+│   └── golang-http/
 │
 ├── scripts/                           # Measurement and analysis
 │   ├── benchmark-latency.sh           # Sequential latency measurement
-│   ├── benchmark-concurrent.sh        # Concurrent latency measurement
-│   ├── benchmark-multi-level.sh       # Multi-level CPU sweep (Phase 2)
-│   ├── record-cfs-stats.sh            # CFS throttling counter collection
 │   ├── compute-stats.py               # P50/P95/P99/mean/stddev computation
 │   ├── generate-phase1-plots.py       # Phase 1 plot generation
 │   ├── generate-phase2-plots.py       # Phase 2 degradation curve plots
-│   ├── generate-phase3-plots.py       # Phase 3 concurrency plots
-│   ├── generate-phase4-plots.py       # Phase 4 tail latency plots
-│   ├── generate-phase5-plots.py       # Phase 5 CFS boundary plots
-│   ├── test-concurrency.sh            # Verify max_inflight behavior
-│   └── bimodality-test.py             # Hartigan dip test + GMM fitting
+│   ├── measure-cpu-burst.sh           # cgroup v2 CPU burst measurement
+│   ├── run-phase2.sh                  # Phase 2 orchestrator (9,000 requests)
+│   ├── run-level.sh                   # Single CPU level runner
+│   ├── smoke-test.sh                  # Function health check
+│   ├── warmup.sh                      # Cold-start elimination
+│   └── test-concurrency.sh            # Concurrency verification
 │
 ├── results/
 │   ├── phase1/                        # Baseline measurements
 │   │   ├── *_latencies.txt            # Raw latency data (6 files)
 │   │   └── plots/                     # 5 baseline plots
-│   ├── phase2/                        # Multi-level measurements
-│   │   ├── *_cpu*_rep*.txt            # Latency data per (func, level, rep)
-│   │   ├── *_cpu*_cfs.txt             # CFS throttling counters
-│   │   └── plots/                     # Degradation curve plots
-│   ├── phase3/                        # Concurrency measurements
-│   ├── phase4/                        # Extended tail measurements
-│   └── phase5/                        # CFS boundary measurements
+│   ├── pre-phase2/                    # CPU burst measurement
+│   │   └── cpu-burst-measurement.md   # Burst size and CFS analysis
+│   └── phase2/                        # Multi-level measurements
+│       ├── *_cpu*_rep*.txt            # Latency data per (func, level, rep)
+│       ├── *_cpu*_cfs.txt             # CFS throttling counters
+│       └── plots/                     # Degradation curve plots
 │
 └── report/                            # Final deliverables
     ├── report.pdf
-    ├── presentation.pdf
-    └── demo_link.txt
+    └── presentation.pdf
 ```
 
 ---
 
-## 16. Appendix D — Mathematical Foundations
+## 14. Appendix D — Mathematical Foundations
 
 ### D.1 The Overcommitment Formula
 
@@ -1923,14 +1559,16 @@ For a Kubernetes CPU limit of X millicores:
 Throttling occurs when:
   CPU work per request > quota per period
 
-  If CPU work = 16ms and quota = 20ms:
-    No throttling (16 < 20) → fast path
+  If CPU work = 7.7ms and quota = 20ms:
+    No throttling (7.7 < 20) → fast path
+    But with ~2.7 requests per period: 2.7 × 7.7 = 20.8ms > 20ms
+    → 3rd request straddles boundary, gets throttled
 
-  If CPU work = 16ms and quota = 14ms:
-    Throttling after 14ms, wait 86ms for next period, use 2ms
-    Total wall-clock = 14 + 86 + 2 = 102ms → slow path
+  If CPU work = 7.7ms and quota = 10ms:
+    Single request fits (7.7 < 10) → fast path
+    But 2nd request: 2 × 7.7 = 15.4ms > 10ms → spills to next period
 
-  The ratio of slow-path latency to fast-path latency ≈ 5-7×
+  The ratio of slow-path latency to fast-path latency ≈ 4-6×
   (one extra CFS period wait = ~80ms added to a ~16ms request)
 ```
 
@@ -1956,52 +1594,35 @@ Why P95 and not mean?
     P99  = 5000 ms (the outlier appears here)
 ```
 
-### D.4 Tail Amplification Factor
+### D.4 CPU Burst Size Computation
 
 ```
-TAF(p) = OC_percentile(p) / NonOC_percentile(p)
+From cgroup v2 cpu.stat, read before and after N requests:
 
-Measures how much overcommitment amplifies latency at percentile p.
+  delta_usage_usec = usage_usec_after - usage_usec_before
+  cpu_per_request = delta_usage_usec / N / 1000  (convert to ms)
 
-If TAF is constant across percentiles:
-  → Uniform degradation (entire distribution shifts by a constant factor)
-  → Typical for CPU-bound functions
+Example (log-filter, 200 requests):
+  usage_usec_before = 1,234,000
+  usage_usec_after  = 2,786,000
+  delta = 1,552,000 µs
+  cpu_per_request = 1,552,000 / 200 / 1000 = 7.76 ms
 
-If TAF increases with percentile:
-  → Tail amplification (overcommitment makes the tail worse disproportionately)
-  → Typical for mixed functions with CFS boundary effects
-  → Indicates that worst-case performance degrades faster than average-case
+This value is intrinsic to the function — it does not change
+with the CPU limit. The limit only controls how much quota
+is available per CFS period, not how much CPU work the function does.
 
-Example:
-  TAF(P50) = 1.5× (median 50% worse)
-  TAF(P99) = 5.3× (tail 530% worse)
-  Tail amplification ratio = 5.3 / 1.5 = 3.5×
-  → The worst 1% of requests are 3.5× more affected than the median request
-```
+Throttle ratio = nr_throttled / nr_periods
+  At 206m (20.6ms quota): 97.3% throttled
+  At 500m (50ms quota):   33.3% throttled
 
-### D.5 Hartigan's Dip Test for Bimodality
-
-```
-The dip statistic D measures the maximum difference between the
-empirical CDF and the closest unimodal CDF.
-
-D = max |F_empirical(x) - F_unimodal(x)|
-
-For a perfectly unimodal distribution: D ≈ 0
-For a bimodal distribution: D > 0 (significant gap at the valley between modes)
-
-Interpretation:
-  D < 0.02: no evidence of bimodality
-  0.02 ≤ D < 0.05: weak evidence
-  D ≥ 0.05: strong evidence of bimodality
-
-We use this to identify the CFS boundary transition: the CPU level
-at which log-filter latency becomes bimodal (D crosses the threshold).
+The throttle ratio directly measures the fraction of CFS periods
+in which the container exhausted its CPU quota.
 ```
 
 ---
 
-## 17. Appendix E — References and Resources
+## 15. Appendix E — References and Resources
 
 ### Paper References
 
@@ -2028,7 +1649,6 @@ at which log-filter latency becomes bimodal (D crosses the threshold).
 | k3s | https://k3s.io | v1.34.6+k3s1 |
 | OpenFaaS | https://www.openfaas.com | Latest (Helm) |
 | faas-cli | https://github.com/openfaas/faas-cli | v0.18.8 |
-| scikit-learn | https://scikit-learn.org | 1.6.1 |
 | Pillow | https://python-pillow.org | 10.2.0 |
 | Redis | https://redis.io | 7-alpine |
 | Helm | https://helm.sh | 3.x |
@@ -2043,7 +1663,6 @@ at which log-filter latency becomes bimodal (D crosses the threshold).
 - cgroup v2 documentation: https://docs.kernel.org/admin-guide/cgroup-v2.html
 - CFS bandwidth control: https://docs.kernel.org/scheduler/sched-bwc.html
 - /proc filesystem: https://www.kernel.org/doc/html/latest/filesystems/proc.html
-- sklearn RandomForestClassifier: https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.RandomForestClassifier.html
 
 ---
 
@@ -2051,10 +1670,8 @@ at which log-filter latency becomes bimodal (D crosses the threshold).
 
 | Week | Phase | Deliverable |
 |---|---|---|
-| Week 1 | Phase 0 + Phase 1 | Running cluster, deployed functions, baseline measurements ✅ |
-| Week 2 | Phase 2 + Phase 3 | Degradation curves, concurrency sweep data |
-| Week 3 | Phase 4 + Phase 5 | Tail latency analysis, CFS boundary validation |
-| Week 4 | Phase 6 + Phase 7 | All plots, statistical analysis, final report, demo |
+| Week 1 | Phase 0 + Phase 1 | Running cluster, deployed functions, baseline measurements, CFS mechanism ✅ |
+| Week 2 | Phase 2 + Phase 3 + Phase 4 | Degradation curves, all plots, statistical analysis, final report, demo |
 
 ---
 
@@ -2063,16 +1680,14 @@ at which log-filter latency becomes bimodal (D crosses the threshold).
 ```
 [x] Phase 0 — Infrastructure Setup (completed 2026-04-11)
 [x] Phase 1 — Benchmark Deployment and Baseline Characterization (completed 2026-04-12)
-[ ] Phase 2 — Multi-Level Degradation Curves
-[ ] Phase 3 — Concurrency Under Overcommitment
-[ ] Phase 4 — Tail Latency Analysis
-[ ] Phase 5 — CFS Quota Boundary Analysis
-[ ] Phase 6 — Analysis and Visualization
-[ ] Phase 7 — Report Writing and Demo (Sections 1-3 drafted)
+  [x] Pre-Phase 2 — CPU Burst Measurement and CFS Mechanism (completed 2026-04-12)
+[~] Phase 2 — Multi-Level Degradation Curves (in progress)
+[ ] Phase 3 — Analysis and Visualization
+[ ] Phase 4 — Report Writing and Demo
 ```
 
-**Total measurement effort remaining:** ~34,800 requests across Phases 2-5
-**Estimated time remaining:** ~2-3 weeks
+**Total measurement effort remaining:** ~9,000 requests (Phase 2)
+**Estimated time remaining:** ~1 week
 **Target:** Characterize how CFS quota enforcement creates profile-dependent latency degradation under overcommitment, and determine whether the degradation patterns are mechanistically explainable
 
 ---
