@@ -1,0 +1,71 @@
+# Phase 2 parameterized deployment template.
+# Usage: export FUNC_NAME=image-resize CPU_MILLI=600 MEM_MI=512 FUNC_IMAGE=image-resize; envsubst < phase2-deploy-template.yaml | kubectl apply -f -
+#
+# Placeholders filled by envsubst:
+#   ${FUNC_NAME}   — deployment/service name (e.g., image-resize-cpu60)
+#   ${FUNC_LABEL}  — base function name for label selector (e.g., image-resize)
+#   ${FUNC_IMAGE}  — container image name (e.g., golgi/image-resize:v1.0)
+#   ${CPU_MILLI}   — CPU limit/request in millicores (e.g., 600)
+#   ${MEM_MI}      — memory limit/request in MiB (e.g., 512)
+#   ${EXTRA_ENV}   — additional env block injected per-function (empty string if none)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${FUNC_NAME}
+  namespace: openfaas-fn
+  labels:
+    faas_function: ${FUNC_NAME}
+    app: ${FUNC_NAME}
+    phase2-func: ${FUNC_LABEL}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      faas_function: ${FUNC_NAME}
+  template:
+    metadata:
+      labels:
+        faas_function: ${FUNC_NAME}
+        app: ${FUNC_NAME}
+        phase2-func: ${FUNC_LABEL}
+    spec:
+      containers:
+      - name: ${FUNC_NAME}
+        image: ${FUNC_IMAGE}
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+          protocol: TCP
+        env:
+        - name: max_inflight
+          value: "4"
+        - name: write_timeout
+          value: "60s"
+        - name: read_timeout
+          value: "60s"
+        - name: exec_timeout
+          value: "60s"
+        resources:
+          requests:
+            cpu: "${CPU_MILLI}m"
+            memory: "${MEM_MI}Mi"
+          limits:
+            cpu: "${CPU_MILLI}m"
+            memory: "${MEM_MI}Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${FUNC_NAME}
+  namespace: openfaas-fn
+  labels:
+    faas_function: ${FUNC_NAME}
+    app: ${FUNC_NAME}
+spec:
+  selector:
+    faas_function: ${FUNC_NAME}
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP

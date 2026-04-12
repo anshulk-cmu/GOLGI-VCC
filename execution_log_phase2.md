@@ -3,7 +3,7 @@
 > **Plan document:** [`PROJECT_PLAN.md`](PROJECT_PLAN.md)
 > **Previous phase:** [`execution_log_phase1.md`](execution_log_phase1.md)
 > **Course:** CSL7510 — Cloud Computing
-> **Students:** Anshul Kumar (M25AI2036), Neha Prasad (M25AI2056)
+> **Students:** Anshul Kumar (M25AI2036), Neha Prasad (M25AI2056), Kirtiman Sarangi (G25AI1024)
 > **Programme:** M.Tech Artificial Intelligence, IIT Jodhpur
 > **Started:** 2026-04-12
 

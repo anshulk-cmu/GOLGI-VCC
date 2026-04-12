@@ -1,7 +1,7 @@
 # Characterizing the Impact of Resource Overcommitment on Serverless Function Latency Across Workload Profiles
 
 > **Course:** CSL7510 — Cloud Computing
-> **Students:** Anshul Kumar (M25AI2036), Neha Prasad (M25AI2056)
+> **Students:** Anshul Kumar (M25AI2036), Neha Prasad (M25AI2056), Kirtiman Sarangi (G25AI1024)
 > **Programme:** M.Tech Artificial Intelligence, IIT Jodhpur
 > **Inspired by:** Golgi: Performance-Aware, Resource-Efficient Function Scheduling for Serverless Computing (ACM SoCC 2023, Best Paper Award)
 > **Paper DOI:** [10.1145/3620678.3624645](https://doi.org/10.1145/3620678.3624645)
