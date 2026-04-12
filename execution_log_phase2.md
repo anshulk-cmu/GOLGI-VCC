@@ -847,4 +847,902 @@ Phase 2 proper will deploy each of the 3 functions at 5 CPU levels (100%, 80%, 6
 For `image-resize` (CPU-bound), we expect linear degradation proportional to CPU reduction.
 For `db-query` (I/O-bound), we expect a flat curve until extremely low CPU levels.
 
-The degradation curves will visually confirm these predictions and provide the data needed for Phase 4 (tail latency analysis) and Phase 6 (visualization).
+The degradation curves will visually confirm these predictions.
+
+---
+
+## Phase 2 Proper: Multi-Level Degradation Curves
+
+> **Started:** 2026-04-12 at 05:14 UTC
+> **Scope per updated README/PROJECT_PLAN:** Degradation curves only (5 CPU levels × 3 functions). Tail latency and concurrency sweeps moved to Future Scope.
+
+The goal of Phase 2 proper is to produce the core figure of the study: three degradation curves showing how P95 latency changes as CPU allocation decreases, one per workload profile. For each function (`image-resize`, `db-query`, `log-filter`), we test 5 CPU levels (100%, 80%, 60%, 40%, 20% of its Non-OC baseline), keeping memory constant. Each (function, level) cell is measured with **200 requests × 3 repetitions = 600 requests**, plus CFS throttling counters read from the pod's cgroup v2 `cpu.stat` before and after measurement.
+
+With 5 levels × 3 functions × 600 requests = **9,000 total requests** and 15 (function, level) cells. Because worker nodes have limited CPU, we cannot run all 15 variants simultaneously — each variant is deployed, warmed up, measured, captured (CFS), and torn down before the next begins.
+
+### Step 2.P.1: Verify infrastructure state — COMPLETED (2026-04-12)
+
+Before deploying anything new, verified the cluster is still healthy and all Phase 1 pods are still running (they had been up for ~4h after the pre-Phase-2 burst measurement).
+
+```bash
+ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+  -i /c/Users/worka/.ssh/golgi-key.pem ec2-user@44.212.35.8 "
+  echo '=== Node Status ===' && kubectl get nodes -o wide && echo '' &&
+  echo '=== Pods ===' && kubectl get pods -n openfaas-fn -o wide && echo '' &&
+  echo '=== OpenFaaS Gateway ===' && curl -s -o /dev/null -w 'HTTP %{http_code}' \
+    http://127.0.0.1:31112/healthz"
+```
+
+**Output:**
+```
+=== Node Status ===
+NAME             STATUS   ROLES           AGE    VERSION        INTERNAL-IP   ...
+golgi-master     Ready    control-plane   7h5m   v1.34.6+k3s1   10.0.1.131    ...
+golgi-worker-1   Ready    <none>          7h3m   v1.34.6+k3s1   10.0.1.110    ...
+golgi-worker-2   Ready    <none>          7h2m   v1.34.6+k3s1   10.0.1.10     ...
+golgi-worker-3   Ready    <none>          7h1m   v1.34.6+k3s1   10.0.1.94     ...
+
+=== Pods ===
+NAME                               READY   STATUS    RESTARTS   AGE    IP          NODE
+db-query-7d44cb8f78-j9zsg          1/1     Running   0          4h4m   10.42.2.4   golgi-worker-2
+db-query-oc-844d6646d9-ttgqk       1/1     Running   0          4h4m   10.42.3.5   golgi-worker-3
+image-resize-74fbfc974c-8bvng      1/1     Running   0          4h4m   10.42.1.4   golgi-worker-1
+image-resize-oc-5fbfb9f5d8-6bk8n   1/1     Running   0          4h4m   10.42.3.6   golgi-worker-3
+log-filter-5858665f9f-h4wrd        1/1     Running   0          4h4m   10.42.2.5   golgi-worker-2
+log-filter-oc-6777b7dc78-7bx4v     1/1     Running   0          4h4m   10.42.3.7   golgi-worker-3
+redis-84d559556f-cg478             1/1     Running   0          6h4m   10.42.1.3   golgi-worker-1
+
+=== OpenFaaS Gateway ===
+HTTP 200
+```
+
+**Reading the output:**
+- All 4 nodes still `Ready` with the same ages from pre-Phase-2. k3s v1.34.6 stable on all nodes.
+- 7 pods running (6 Phase 1 function variants + Redis). Pod placement unchanged from Phase 1.
+- OpenFaaS gateway responds with HTTP 200 on `/healthz` — gateway healthy.
+- This cluster was last used for the pre-Phase-2 CPU burst measurement ~4 hours ago. No restarts, no drift.
+
+Baseline established. Ready to proceed.
+
+---
+
+### Step 2.P.2: Create parameterized deployment manifest — COMPLETED (2026-04-12)
+
+The core deployment problem: we need to deploy **15 variants** of 3 function images at **arbitrary CPU limits**. Writing 15 separate YAML files is error-prone and does not scale. The existing [`functions-deploy.yaml`](functions/functions-deploy.yaml) hardcodes the 6 Phase 1 variants with fixed resource values (`1000m`, `405m`, etc.) and cannot be reused.
+
+**Design choice:** Use a single template YAML with `envsubst` placeholders filled in at deploy time. `envsubst` is part of GNU gettext and is pre-installed on Amazon Linux 2023 (verified with `which envsubst` → `/usr/bin/envsubst`).
+
+**Why envsubst and not Helm/Kustomize:** We already have OpenFaaS-built Docker images pushed to the containerd image store on each worker (`golgi/image-resize:v1.0`, etc.). We don't need a Helm chart — we need a minimal Deployment+Service that references those existing images with variable resource limits. `envsubst` is a one-line transformation, no new tooling.
+
+**Why `requests == limits`:** Kubernetes assigns pods to the **Guaranteed QoS class** only when every container has `requests.cpu == limits.cpu` and `requests.memory == limits.memory`. Guaranteed QoS is what we want for measurement cleanliness:
+- Pods get a dedicated cgroup slice at `/sys/fs/cgroup/kubepods.slice/kubepods-pod<uid>.slice/` (not inside the `burstable.slice` subtree).
+- CFS quota is enforced exactly at the requested value — no borrowing from burstable neighbours.
+- The pod-level cgroup is created on pod startup and persists for the lifetime of the pod, making `cpu.stat` deltas directly attributable to our test workload.
+
+We used this same approach successfully in pre-Phase-2 for `log-filter` and `log-filter-oc`.
+
+**File created:** [`functions/phase2-deploy-template.yaml`](functions/phase2-deploy-template.yaml)
+
+```yaml
+# Phase 2 parameterized deployment template.
+# Usage: export FUNC_NAME=image-resize CPU_MILLI=600 MEM_MI=512 FUNC_IMAGE=image-resize;
+#        envsubst < phase2-deploy-template.yaml | kubectl apply -f -
+#
+# Placeholders filled by envsubst:
+#   ${FUNC_NAME}   — deployment/service name (e.g., image-resize-cpu60)
+#   ${FUNC_LABEL}  — base function name for label selector (e.g., image-resize)
+#   ${FUNC_IMAGE}  — container image name (e.g., golgi/image-resize:v1.0)
+#   ${CPU_MILLI}   — CPU limit/request in millicores (e.g., 600)
+#   ${MEM_MI}      — memory limit/request in MiB (e.g., 512)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${FUNC_NAME}
+  namespace: openfaas-fn
+  labels:
+    faas_function: ${FUNC_NAME}
+    app: ${FUNC_NAME}
+    phase2-func: ${FUNC_LABEL}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      faas_function: ${FUNC_NAME}
+  template:
+    metadata:
+      labels:
+        faas_function: ${FUNC_NAME}
+        app: ${FUNC_NAME}
+        phase2-func: ${FUNC_LABEL}
+    spec:
+      containers:
+      - name: ${FUNC_NAME}
+        image: ${FUNC_IMAGE}
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+          protocol: TCP
+        env:
+        - name: max_inflight
+          value: "4"
+        - name: write_timeout
+          value: "60s"
+        - name: read_timeout
+          value: "60s"
+        - name: exec_timeout
+          value: "60s"
+        resources:
+          requests:
+            cpu: "${CPU_MILLI}m"
+            memory: "${MEM_MI}Mi"
+          limits:
+            cpu: "${CPU_MILLI}m"
+            memory: "${MEM_MI}Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${FUNC_NAME}
+  namespace: openfaas-fn
+  labels:
+    faas_function: ${FUNC_NAME}
+    app: ${FUNC_NAME}
+spec:
+  selector:
+    faas_function: ${FUNC_NAME}
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP
+```
+
+**Key design decisions in the template:**
+
+1. **`phase2-func` label** — lets us find all variants of a given function across the 5 CPU levels with a single label selector (e.g., `kubectl get pods -l phase2-func=image-resize`). The `faas_function` label is unique per deployment (`image-resize-cpu60`, `image-resize-cpu80`, etc.), so we cannot use it for cross-level queries.
+
+2. **`imagePullPolicy: IfNotPresent`** — the images are already imported into each worker's containerd store via `ctr images import` during Phase 1 setup. `IfNotPresent` tells k3s to reuse the local image instead of pulling from a registry we don't have.
+
+3. **`max_inflight: "4"`** — OpenFaaS of-watchdog environment variable that bounds concurrent request processing inside the container. Matches Phase 1 setting.
+
+4. **`write/read/exec_timeout: 60s`** — of-watchdog timeouts. These must be large enough to accommodate the slowest requests we'll measure. At 20% CPU, image-resize is expected to take ~22s per request, and the of-watchdog default (5s) would time out mid-request. 60s gives margin.
+
+5. **`db-query` needs a `REDIS_HOST` env var** which is not in the template. We handle this by a separate `kubectl set env deployment/<name> -n openfaas-fn REDIS_HOST=redis.openfaas-fn.svc.cluster.local` call in the runner script after the initial `kubectl apply`. This keeps the template generic and avoids branching YAML.
+
+**Dry-run verification on the master** (after SCP'ing the template, before first use):
+
+```bash
+ssh ec2-user@44.212.35.8 "
+  export FUNC_NAME='image-resize-cpu100' FUNC_LABEL='image-resize' \
+         FUNC_IMAGE='golgi/image-resize:v1.0' CPU_MILLI='1000' MEM_MI='512'
+  envsubst < /home/ec2-user/phase2-deploy-template.yaml | head -30
+"
+```
+
+**Output (truncated):**
+```yaml
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: image-resize-cpu100
+  namespace: openfaas-fn
+  labels:
+    faas_function: image-resize-cpu100
+    app: image-resize-cpu100
+    phase2-func: image-resize
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      faas_function: image-resize-cpu100
+...
+```
+
+All 5 variables substituted correctly. Template is valid.
+
+---
+
+### Step 2.P.3: Create initial runner script — SUPERSEDED (2026-04-12)
+
+Wrote an initial end-to-end loop script [`scripts/run-phase2.sh`](scripts/run-phase2.sh) that iterates all 3 functions × 5 CPU levels × 3 reps. The intent was to run the entire experiment in a single invocation.
+
+```bash
+# run-phase2.sh — Phase 2: Multi-Level Degradation Curves
+# Deploys each function at 5 CPU levels, measures latency (200 req × 3 reps),
+# records CFS throttling stats, then tears down before the next level.
+
+FUNCTIONS=(
+  "image-resize:golgi/image-resize:v1.0:1000:512"
+  "db-query:golgi/db-query:v1.0:500:256"
+  "log-filter:golgi/log-filter:v1.0:500:256"
+)
+CPU_PCTS=(100 80 60 40 20)
+
+# ... loops, deploy_variant, measure_rep, record_cfs_stats, teardown_variant ...
+```
+
+**Why it was superseded:** Running all 15 variants in a single monolithic script is risky for a multi-hour experiment — any SSH disconnect, any subtle bug in the CFS reader, any unexpected pod state on one variant would kill the entire run. Instead, we split execution into a per-level script ([`scripts/run-level.sh`](scripts/run-level.sh), created in Step 2.P.6) that we invoke one level at a time. This gives us:
+- Check-pointing between levels (easy to resume if something fails)
+- Observability (we see each level's results immediately, not after hours)
+- Easy workaround when the inline CFS-reading logic hit a quoting bug (Step 2.P.8)
+
+`run-phase2.sh` is kept in the repo for reference as the canonical "if everything just works, do this" invocation.
+
+---
+
+### Step 2.P.4: Deploy artifacts to master node — COMPLETED (2026-04-12)
+
+```bash
+scp -o StrictHostKeyChecking=no -i /c/Users/worka/.ssh/golgi-key.pem \
+  d:/golgi_vcc/functions/phase2-deploy-template.yaml \
+  ec2-user@44.212.35.8:/home/ec2-user/phase2-deploy-template.yaml
+
+scp -o StrictHostKeyChecking=no -i /c/Users/worka/.ssh/golgi-key.pem \
+  d:/golgi_vcc/scripts/run-phase2.sh \
+  ec2-user@44.212.35.8:/home/ec2-user/run-phase2.sh
+```
+
+Verified on master:
+
+```bash
+ssh ec2-user@44.212.35.8 "
+  ls -la /home/ec2-user/phase2-deploy-template.yaml /home/ec2-user/run-phase2.sh
+  chmod +x /home/ec2-user/run-phase2.sh
+  which envsubst && echo 'envsubst OK'
+"
+```
+
+**Output:**
+```
+-rw-r--r--. 1 ec2-user ec2-user 1962 Apr 12 05:15 /home/ec2-user/phase2-deploy-template.yaml
+-rwxr-xr-x. 1 ec2-user ec2-user 9772 Apr 12 05:15 /home/ec2-user/run-phase2.sh
+/usr/bin/envsubst
+envsubst OK
+```
+
+---
+
+### Step 2.P.5: Copy SSH key to master for worker cgroup access — COMPLETED (2026-04-12)
+
+**Problem discovered:** The runner script needs to SSH from the master to each worker node to read `/sys/fs/cgroup/.../cpu.stat`. The master had no SSH key for the workers — up to this point, every worker SSH session had originated from the Windows laptop directly.
+
+**Fix:** Copy `golgi-key.pem` to the master at `~/.ssh/golgi-key.pem` with mode 600. The workers already trust this key (they were provisioned from the same key pair during Phase 0).
+
+```bash
+scp -o StrictHostKeyChecking=no -i /c/Users/worka/.ssh/golgi-key.pem \
+  /c/Users/worka/.ssh/golgi-key.pem \
+  ec2-user@44.212.35.8:/home/ec2-user/.ssh/golgi-key.pem
+
+ssh ec2-user@44.212.35.8 "
+  chmod 600 ~/.ssh/golgi-key.pem
+  # Test SSH to worker-1
+  ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+    -i ~/.ssh/golgi-key.pem ec2-user@10.0.1.110 'hostname'
+"
+```
+
+**Output:**
+```
+-rw-------. 1 ec2-user ec2-user 1706 Apr 12 05:16 /home/ec2-user/.ssh/golgi-key.pem
+ip-10-0-1-110.ec2.internal
+```
+
+SSH hop master → worker-1 works. The key is now available to any script running on the master. **Security note:** this key is confined to the master's `/home/ec2-user/.ssh/` and the worker nodes only accept SSH from inside the VPC (security group rule). No external exposure.
+
+---
+
+### Step 2.P.6: Phase 1 teardown — COMPLETED (2026-04-12)
+
+Before Phase 2 can deploy variants, we need to free the workers of the 6 Phase 1 function pods. They occupy `image-resize` (1000m), `image-resize-oc` (405m), `db-query` (500m), `db-query-oc` (185m), `log-filter` (500m), `log-filter-oc` (206m) across workers 1, 2, 3. Adding a new `image-resize-cpu100` (1000m) pod would have tight scheduling constraints and might land on an unexpected node.
+
+We keep Redis (`redis-84d559556f-cg478`) running — `db-query` variants need it as their I/O target.
+
+```bash
+ssh ec2-user@44.212.35.8 "
+  for deploy in image-resize image-resize-oc db-query db-query-oc log-filter log-filter-oc; do
+    kubectl delete deployment \$deploy -n openfaas-fn --ignore-not-found=true
+    kubectl delete service \$deploy -n openfaas-fn --ignore-not-found=true
+  done
+  sleep 10
+  kubectl get pods -n openfaas-fn --no-headers
+"
+```
+
+**Output (after two wait iterations to let termination complete):**
+```
+deployment.apps "image-resize" deleted from openfaas-fn namespace
+service "image-resize" deleted from openfaas-fn namespace
+... (5 more pairs) ...
+redis-84d559556f-cg478   1/1   Running   0     6h8m
+```
+
+Only Redis remains. Workers 1 and 2 are fully free of function pods. Worker 3 (which hosted all 3 OC variants in Phase 1) is also clean.
+
+---
+
+### Step 2.P.7: Measure image-resize @ 100% (1000m, baseline sanity check) — COMPLETED (2026-04-12)
+
+**Purpose:** Deploy `image-resize` at its full Non-OC allocation (1000m CPU, 512 MiB) and verify the measured P95 matches the Phase 1 baseline of ~4591 ms. This is a control datapoint — if it diverges from Phase 1, something in the Phase 2 setup is wrong and we stop.
+
+#### Deploy + warmup
+
+```bash
+ssh ec2-user@44.212.35.8 '
+set -euo pipefail
+GATEWAY="http://127.0.0.1:31112"
+TEMPLATE="/home/ec2-user/phase2-deploy-template.yaml"
+
+export FUNC_NAME="image-resize-cpu100" FUNC_LABEL="image-resize" \
+       FUNC_IMAGE="golgi/image-resize:v1.0" CPU_MILLI="1000" MEM_MI="512"
+envsubst < "$TEMPLATE" | kubectl apply -f -
+kubectl rollout status deployment/image-resize-cpu100 -n openfaas-fn --timeout=120s
+sleep 3
+kubectl get pods -n openfaas-fn -l faas_function=image-resize-cpu100 -o wide --no-headers
+
+# Warmup (10 requests)
+for i in $(seq 1 10); do
+  curl -s -o /dev/null --max-time 60 \
+    "$GATEWAY/function/image-resize-cpu100" -d "{\"width\":1920,\"height\":1080}"
+done
+'
+```
+
+**Output:**
+```
+deployment.apps/image-resize-cpu100 created
+service/image-resize-cpu100 created
+Waiting for deployment "image-resize-cpu100" rollout to finish: 0 out of 1 new replicas have been updated...
+Waiting for deployment "image-resize-cpu100" rollout to finish: 0 of 1 updated replicas are available...
+deployment "image-resize-cpu100" successfully rolled out
+image-resize-cpu100-8499ff467f-ks7n8   1/1   Running   0     5s    10.42.3.8   golgi-worker-3
+Warming up...
+Warmup done.
+```
+
+The new pod landed on `golgi-worker-3`. Rolled out in ~5 seconds. Warmup (10 requests, ~4.5s each) discarded to eliminate first-invocation Python import overhead.
+
+#### Rep 1/3 — 200 sequential requests
+
+```bash
+ssh ec2-user@44.212.35.8 '
+set -euo pipefail
+GATEWAY="http://127.0.0.1:31112"
+RESULTS_DIR="/home/ec2-user/results/phase2"
+PAYLOAD="{\"width\":1920,\"height\":1080}"
+FUNC="image-resize-cpu100"
+
+rm -f "$RESULTS_DIR/image-resize_cpu100_rep1.txt"
+ERRORS=0
+for i in $(seq 1 200); do
+  start=$(date +%s%N)
+  HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 120 \
+    "$GATEWAY/function/$FUNC" -d "$PAYLOAD") || HTTP_CODE="000"
+  end=$(date +%s%N)
+  latency_ms=$(( (end - start) / 1000000 ))
+  echo "$latency_ms" >> "$RESULTS_DIR/image-resize_cpu100_rep1.txt"
+  if [ "$HTTP_CODE" != "200" ]; then ERRORS=$((ERRORS + 1)); fi
+  if [ $((i % 50)) -eq 0 ]; then echo "  Progress: $i/200 — last: ${latency_ms}ms"; fi
+done
+
+sort -n "$RESULTS_DIR/image-resize_cpu100_rep1.txt" | awk "
+BEGIN{n=0;sum=0}
+{a[n]=\$1;sum+=\$1;n++}
+END{printf \"Rep1: n=%d mean=%.0f p50=%d p95=%d p99=%d min=%d max=%d\\n\", n, sum/n, a[int(n*0.50)], a[int(n*0.95)], a[int(n*0.99)], a[0], a[n-1]}"
+'
+```
+
+**Output:**
+```
+=== Rep 1/3: image-resize @ 100% ===
+Start: 2026-04-12T05:18:46Z
+  Progress: 50/200 — last: 4545ms
+  Progress: 100/200 — last: 4568ms
+  Progress: 150/200 — last: 4558ms
+  Progress: 200/200 — last: 4545ms
+End: 2026-04-12T05:33:56Z
+Errors: 0
+Rep1 Stats: n=200 mean=4552 p50=4547 p95=4623 p99=4702 min=4498 max=4715
+```
+
+**Reading the output:**
+- 200 requests, 0 errors. Clean run.
+- Duration: 05:18:46 → 05:33:56 = **15 minutes 10 seconds** (~4.55s/request on average).
+- P95 = 4623 ms. **Phase 1 baseline was 4591 ms.** Difference: 32 ms (0.7%). Well within measurement noise.
+- Very tight distribution: min=4498, max=4715, spread=217 ms. This is characteristic of a CPU-bound workload with no I/O wait variance.
+
+**Sanity check PASSED.** The Phase 2 setup matches Phase 1 baselines. Proceeding.
+
+#### Rep 2/3 and Rep 3/3
+
+Repeated the same measurement loop twice more, saving to `rep2.txt` and `rep3.txt`.
+
+**Outputs:**
+```
+=== Rep 2/3: image-resize @ 100% ===
+Start: 2026-04-12T05:34:19Z
+End:   2026-04-12T05:49:29Z
+Errors: 0
+Rep2: n=200 mean=4546 p50=4540 p95=4602 p99=4672 min=4493 max=4683
+
+=== Rep 3/3: image-resize @ 100% ===
+Start: 2026-04-12T05:49:29Z
+End:   2026-04-12T06:04:39Z
+Errors: 0
+Rep3: n=200 mean=4549 p50=4542 p95=4608 p99=4764 min=4494 max=4792
+```
+
+#### image-resize @ 100% — Summary
+
+| Rep | n | Mean | P50 | P95 | P99 | Min | Max | Errors |
+|-----|---|------|-----|-----|-----|-----|-----|--------|
+| 1   | 200 | 4552 | 4547 | 4623 | 4702 | 4498 | 4715 | 0 |
+| 2   | 200 | 4546 | 4540 | 4602 | 4672 | 4493 | 4683 | 0 |
+| 3   | 200 | 4549 | 4542 | 4608 | 4764 | 4494 | 4792 | 0 |
+| **Mean across reps** | — | **4549** | **4543** | **4611** | **4713** | — | — | **0** |
+
+**Inter-rep variance:** P95 spans [4602, 4623] — a 21 ms window across 600 independent requests. Very stable. The one outlier (Rep3 max=4792) pulls Rep3's P99 higher, but P95 and below are nearly identical across reps.
+
+**Cost:** 3 reps × 15 min = 45 minutes of wall-clock time for this single data point.
+
+---
+
+### Step 2.P.8: Record CFS stats for cpu100 — initial inline approach failed, workaround created — COMPLETED (2026-04-12)
+
+After the 3 reps, we need to capture `cpu.stat` from the pod's cgroup to quantify throttling. The first attempt used an inline nested-SSH command embedded in the outer ssh invocation to the master:
+
+```bash
+ssh ec2-user@44.212.35.8 "
+RESULTS_DIR=/home/ec2-user/results/phase2
+SSH_KEY=/home/ec2-user/.ssh/golgi-key.pem
+FUNC=image-resize-cpu100
+
+POD_UID=\$(kubectl get pods -n openfaas-fn -l faas_function=\$FUNC -o jsonpath='{.items[0].metadata.uid}')
+# ... more variable extraction ...
+
+ssh -o StrictHostKeyChecking=no -i \$SSH_KEY ec2-user@\$NODE_IP \"
+  BASE=/sys/fs/cgroup/kubepods.slice/kubepods-pod\${POD_UID_CG}.slice
+  for d in \\\$BASE/cri-containerd-*.scope; do
+    ...
+    usage=\\\$(grep usage_usec \\\$d/cpu.stat | awk '{print \\\\\\\$2}')
+    ...
+  done
+\"
+"
+```
+
+**Error:**
+```
+awk: cmd. line:1: {print \\\\$2}
+awk: cmd. line:1:        ^ backslash not last character on line
+```
+
+The triple-nested shell (local bash → ssh master → ssh worker → awk) requires 4 levels of backslash escaping for the `$2` inside the `awk` pattern, and the exact count is hard to get right. Even when the total number is correct, the first shell layer removes one level of backslashes before passing the string to ssh, which then removes another layer, and so on.
+
+**Workaround:** Put the script on the master as a standalone file and invoke it by name. This collapses 3 of the 4 escape layers.
+
+**File created on master at `/tmp/read-cfs.sh`** (and synced back to the local repo at [`scripts/read-cfs.sh`](scripts/read-cfs.sh)):
+
+```bash
+#!/bin/bash
+set -euo pipefail
+FUNC=$1
+OUTFILE=$2
+SSH_KEY=/home/ec2-user/.ssh/golgi-key.pem
+
+POD_UID=$(kubectl get pods -n openfaas-fn -l faas_function=$FUNC -o jsonpath='{.items[0].metadata.uid}')
+NODE_NAME=$(kubectl get pods -n openfaas-fn -l faas_function=$FUNC -o jsonpath='{.items[0].spec.nodeName}')
+NODE_IP=$(kubectl get node $NODE_NAME -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
+POD_UID_CG=$(echo $POD_UID | tr '-' '_')
+
+echo "Pod UID: $POD_UID | Node: $NODE_NAME ($NODE_IP)"
+
+ssh -o StrictHostKeyChecking=no -i $SSH_KEY ec2-user@$NODE_IP bash -s $POD_UID_CG << 'REMOTE'
+POD_UID_CG=$1
+BASE="/sys/fs/cgroup/kubepods.slice/kubepods-pod${POD_UID_CG}.slice"
+for d in "$BASE"/cri-containerd-*.scope; do
+  if [ -f "$d/cpu.stat" ]; then
+    usage=$(grep usage_usec "$d/cpu.stat" | awk '{print $2}')
+    if [ "$usage" -gt 500000 ]; then
+      echo "cgroup: $d"
+      echo "--- cpu.stat ---"
+      cat "$d/cpu.stat"
+      echo "--- cpu.max ---"
+      cat "$d/cpu.max"
+      break
+    fi
+  fi
+done
+REMOTE
+```
+
+**Why this works:**
+
+1. **`bash -s <arg> << 'REMOTE'` with a quoted heredoc delimiter.** The single-quotes around `'REMOTE'` tell the outer shell to pass the heredoc contents to `bash -s` **literally, without any variable or backslash expansion**. `$BASE`, `$d`, `$usage`, `$1` are all seen by the remote bash exactly as written.
+
+2. **Argument passing via `bash -s $POD_UID_CG`.** The outer script still needs to tell the remote shell which pod UID to look up. We pass it as a positional argument (`$1` on the remote). This is clean — no string interpolation into the heredoc.
+
+3. **`usage > 500000` filter.** Each pod has two cgroup scopes inside its slice: the **pause container** (network namespace holder, ~35,000 µs of total CPU) and the **function container** (the real workload, millions of µs). We filter by `usage_usec > 500,000` to pick the function container and skip the pause. This was the same trick used in pre-Phase-2.
+
+**Execution:**
+
+```bash
+ssh ec2-user@44.212.35.8 "
+  bash /tmp/read-cfs.sh image-resize-cpu100 dummy \
+    | tee /home/ec2-user/results/phase2/image-resize_cpu100_cfs.txt
+"
+```
+
+**Output** (also saved to [`results/phase2/image-resize_cpu100_cfs.txt`](results/phase2/image-resize_cpu100_cfs.txt)):
+```
+Pod UID: 6dc47473-0748-40b0-a416-b4368e1043f2 | Node: golgi-worker-3 (10.0.1.94)
+cgroup: /sys/fs/cgroup/kubepods.slice/kubepods-pod6dc47473_0748_40b0_a416_b4368e1043f2.slice/cri-containerd-f457d05b0636d75376eeeb52222954a49ab1d2de5ce9d5cdd5433477f652e4d4.scope
+--- cpu.stat ---
+usage_usec 2765051293
+user_usec 2758931409
+system_usec 6119884
+core_sched.force_idle_usec 0
+nr_periods 35793
+nr_throttled 5307
+throttled_usec 421000
+nr_bursts 0
+burst_usec 0
+--- cpu.max ---
+100000 100000
+```
+
+**Reading the output:**
+
+| Field | Value | Meaning |
+|---|---|---|
+| `cpu.max` | `100000 100000` | Quota=100,000 µs, Period=100,000 µs → 1000m (full CPU) |
+| `usage_usec` | 2,765,051,293 | 2,765 seconds of cumulative CPU time since pod start |
+| `nr_periods` | 35,793 | CFS periods elapsed (35,793 × 100 ms = 59.7 min) |
+| `nr_throttled` | 5,307 | Periods where the container hit its quota ceiling |
+| `throttled_usec` | 421,000 | Only 421 ms cumulative throttle delay |
+| **Throttle ratio** | **5307 / 35793 = 14.8%** | Fraction of periods that were throttled |
+| **Avg throttle duration** | **421 ms / 5307 ≈ 79 µs** | Per-throttle stall duration |
+
+**Interpretation:** Even with the full 1000m (equivalent to 1 entire vCPU on a 4-vCPU box), 14.8% of CFS periods hit the quota ceiling. This is because image-resize is actively trying to saturate a single CPU core — Pillow's Lanczos resampling is a tight C loop that pegs one thread at 100%. Occasional CFS period edges do clip, but the throttle duration (79 µs) is tiny and does not affect wall-clock latency meaningfully. The 421 ms of cumulative throttling across ~60 minutes of execution is effectively 0.01% of wall-clock time — negligible.
+
+**Note on interpretation:** The `usage_usec` and `nr_periods` values include the warmup window, the 3 measurement reps, and any idle time between reps. For a clean delta-based analysis we would read `cpu.stat` both before and after each rep. For the 100% level we only read it after (this was before we had the per-level script). From 80% onward we read it both before and after. Since image-resize at 100% is not throttle-bound anyway, the missing "before" snapshot is not critical here.
+
+#### Teardown image-resize-cpu100
+
+```bash
+ssh ec2-user@44.212.35.8 "
+  kubectl delete deployment image-resize-cpu100 -n openfaas-fn --ignore-not-found=true
+  kubectl delete service image-resize-cpu100 -n openfaas-fn --ignore-not-found=true
+  sleep 8
+  kubectl get pods -n openfaas-fn --no-headers
+"
+```
+
+**Output:**
+```
+deployment.apps "image-resize-cpu100" deleted from openfaas-fn namespace
+service "image-resize-cpu100" deleted from openfaas-fn namespace
+redis-84d559556f-cg478   1/1   Running   0     19h
+```
+
+Only Redis remains. Worker-3 is free. Ready for the next level.
+
+---
+
+### Step 2.P.9: Create per-level runner script — COMPLETED (2026-04-12)
+
+Writing the inline shell for every level is noisy and error-prone. Packaged the deploy → warmup → 3-rep measure → CFS capture → teardown flow into a single parameterized script: [`scripts/run-level.sh`](scripts/run-level.sh).
+
+**Invocation:** `bash run-level.sh <func_label> <cpu_pct> <cpu_milli> <mem_mi> <image>`
+
+Example: `bash run-level.sh image-resize 80 800 512 golgi/image-resize:v1.0`
+
+```bash
+#!/bin/bash
+# run-level.sh — Run one function at one CPU level: deploy, warmup, measure x3, CFS stats, teardown.
+set -euo pipefail
+
+FUNC_LABEL=$1
+CPU_PCT=$2
+CPU_MILLI=$3
+MEM_MI=$4
+IMAGE=$5
+GATEWAY="${6:-http://127.0.0.1:31112}"
+
+NUM_REQUESTS=200
+NUM_REPS=3
+RESULTS_DIR="/home/ec2-user/results/phase2"
+TEMPLATE="/home/ec2-user/phase2-deploy-template.yaml"
+
+DEPLOY_NAME="${FUNC_LABEL}-cpu${CPU_PCT}"
+
+case "$FUNC_LABEL" in
+  image-resize) PAYLOAD='{"width":1920,"height":1080}' ;;
+  db-query)     PAYLOAD='{"operation":"set","key":"bench","value":"payload"}' ;;
+  log-filter)   PAYLOAD='{"lines":100,"pattern":"ERROR"}' ;;
+  *)            echo "Unknown function: $FUNC_LABEL"; exit 1 ;;
+esac
+
+# --- Deploy ---
+export FUNC_NAME="$DEPLOY_NAME" FUNC_LABEL FUNC_IMAGE="$IMAGE" CPU_MILLI MEM_MI
+envsubst < "$TEMPLATE" | kubectl apply -f -
+
+if [[ "$FUNC_LABEL" == "db-query" ]]; then
+  kubectl set env deployment/"$DEPLOY_NAME" -n openfaas-fn \
+    REDIS_HOST=redis.openfaas-fn.svc.cluster.local
+fi
+
+kubectl rollout status deployment/"$DEPLOY_NAME" -n openfaas-fn --timeout=120s
+sleep 3
+
+# --- Warmup ---
+for i in $(seq 1 10); do
+  curl -s -o /dev/null --max-time 120 "$GATEWAY/function/$DEPLOY_NAME" -d "$PAYLOAD"
+done
+
+# --- CFS before ---
+bash /tmp/read-cfs.sh "$DEPLOY_NAME" dummy \
+  > "$RESULTS_DIR/${FUNC_LABEL}_cpu${CPU_PCT}_cfs_before.txt" 2>&1
+
+# --- Measure 3 reps ---
+for rep in $(seq 1 $NUM_REPS); do
+  OUTFILE="$RESULTS_DIR/${FUNC_LABEL}_cpu${CPU_PCT}_rep${rep}.txt"
+  rm -f "$OUTFILE"
+  for i in $(seq 1 $NUM_REQUESTS); do
+    start=$(date +%s%N)
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 120 \
+      "$GATEWAY/function/$DEPLOY_NAME" -d "$PAYLOAD") || HTTP_CODE="000"
+    end=$(date +%s%N)
+    echo $(( (end - start) / 1000000 )) >> "$OUTFILE"
+  done
+  sort -n "$OUTFILE" | awk -v r="$rep" \
+    'BEGIN{n=0;s=0}{a[n]=$1;s+=$1;n++}END{printf "Rep%d: n=%d mean=%.0f p50=%d p95=%d p99=%d min=%d max=%d\n",r,n,s/n,a[int(n*0.50)],a[int(n*0.95)],a[int(n*0.99)],a[0],a[n-1]}'
+done
+
+# --- CFS after ---
+bash /tmp/read-cfs.sh "$DEPLOY_NAME" dummy \
+  > "$RESULTS_DIR/${FUNC_LABEL}_cpu${CPU_PCT}_cfs_after.txt" 2>&1
+
+# --- Teardown ---
+kubectl delete deployment "$DEPLOY_NAME" -n openfaas-fn --ignore-not-found=true
+kubectl delete service "$DEPLOY_NAME" -n openfaas-fn --ignore-not-found=true
+sleep 8
+```
+
+(The full script in the repo also prints timestamps and pod placement info — see [scripts/run-level.sh](scripts/run-level.sh).)
+
+**Key design choices:**
+
+1. **Positional arguments, not env vars.** Invoking `bash run-level.sh image-resize 80 800 512 golgi/image-resize:v1.0` is self-documenting at the call site. Env-var dispatch would hide the parameters.
+
+2. **`case $FUNC_LABEL` for payloads.** Each function has a different HTTP body. Hardcoding these inside the script keeps the caller clean and avoids passing JSON on the command line.
+
+3. **Quoted heredoc (`<< 'REMOTE'`) in the nested CFS call to `read-cfs.sh`.** Same escaping fix as Step 2.P.8.
+
+4. **`--max-time 120` on all curl calls.** At 20% CPU, image-resize is expected to take ~22s per request; at lower CPU levels, outliers could take much longer. A 120s per-request timeout protects against a hung request stalling the whole run indefinitely.
+
+5. **`kubectl rollout status --timeout=120s` gate between deploy and warmup.** Ensures the pod is genuinely `Ready` (Kubelet has reported passing readiness probe) before we send the first request, avoiding cold-start measurements leaking into the results.
+
+6. **`sleep 8` after teardown.** `kubectl delete` returns immediately once the API server accepts the deletion, but the kubelet and containerd take a few seconds to actually stop the container and release the cgroup. We wait 8 seconds to ensure the next variant starts with a clean slate on whichever worker it lands on.
+
+SCP'd to master:
+```bash
+scp d:/golgi_vcc/scripts/run-level.sh ec2-user@44.212.35.8:/tmp/run-level.sh
+ssh ec2-user@44.212.35.8 "chmod +x /tmp/run-level.sh"
+```
+
+---
+
+### Step 2.P.10: Measure image-resize @ 80% (800m) — COMPLETED (2026-04-12)
+
+First use of the new per-level script. Expected behavior based on linear scaling: mean ≈ 4550 × (1/0.8) = 5687 ms.
+
+```bash
+ssh ec2-user@44.212.35.8 "bash /tmp/run-level.sh image-resize 80 800 512 golgi/image-resize:v1.0"
+```
+
+**Full output** (elapsed: 18:14:46 → 19:13:26 UTC = **58 minutes 40 seconds**):
+
+```
+═══════════════════════════════════════════
+image-resize @ 80% (800m CPU, 512Mi mem)
+Deploy: image-resize-cpu80
+Started: 2026-04-12T18:14:46Z
+═══════════════════════════════════════════
+deployment.apps/image-resize-cpu80 created
+service/image-resize-cpu80 created
+Waiting for deployment "image-resize-cpu80" rollout to finish: 0 out of 1 new replicas have been updated...
+Waiting for deployment "image-resize-cpu80" rollout to finish: 0 of 1 updated replicas are available...
+deployment "image-resize-cpu80" successfully rolled out
+Pod: image-resize-cpu80-7cc8cdf498-bvwz4   1/1   Running   0     5s    10.42.3.9   golgi-worker-3
+Warming up (10 requests)...
+Warmup done.
+
+Recording CFS stats (before)...
+Pod UID: cac738d9-8124-40cb-a254-7ca4758c8b0e | Node: golgi-worker-3 (10.0.1.94)
+cgroup: /sys/fs/cgroup/kubepods.slice/kubepods-podcac738d9_8124_40cb_a254_7ca4758c8b0e.slice/cri-containerd-7577cb6bc8ce2a044a12f34ac8d549b94d11787febb6323af67fe7c7a2f14c5b.scope
+--- cpu.stat ---
+usage_usec 46253549
+user_usec 46103539
+system_usec 150009
+core_sched.force_idle_usec 0
+nr_periods 582
+nr_throttled 569
+throttled_usec 11122560
+nr_bursts 0
+burst_usec 0
+--- cpu.max ---
+80000 100000
+
+=== Rep 1/3: image-resize @ 80% ===
+Start: 2026-04-12T18:15:50Z
+  Progress: 50/200 — last: 5750ms
+  Progress: 100/200 — last: 5740ms
+  Progress: 150/200 — last: 5760ms
+  Progress: 200/200 — last: 5735ms
+End: 2026-04-12T18:34:59Z
+Errors: 0
+Rep1: n=200 mean=5741 p50=5736 p95=5787 p99=5820 min=5697 max=5821
+
+=== Rep 2/3: image-resize @ 80% ===
+Start: 2026-04-12T18:34:59Z
+  Progress: 50/200 — last: 5739ms
+  Progress: 100/200 — last: 5732ms
+  Progress: 150/200 — last: 5718ms
+  Progress: 200/200 — last: 5802ms
+End: 2026-04-12T18:54:07Z
+Errors: 0
+Rep2: n=200 mean=5738 p50=5733 p95=5785 p99=5844 min=5665 max=5847
+
+=== Rep 3/3: image-resize @ 80% ===
+Start: 2026-04-12T18:54:07Z
+  Progress: 50/200 — last: 5722ms
+  Progress: 100/200 — last: 5738ms
+  Progress: 150/200 — last: 5722ms
+  Progress: 200/200 — last: 5746ms
+End: 2026-04-12T19:13:16Z
+Errors: 0
+Rep3: n=200 mean=5745 p50=5740 p95=5800 p99=5922 min=5696 max=5977
+
+Recording CFS stats (after)...
+Pod UID: cac738d9-8124-40cb-a254-7ca4758c8b0e | Node: golgi-worker-3 (10.0.1.94)
+cgroup: /sys/fs/cgroup/kubepods.slice/kubepods-podcac738d9_8124_40cb_a254_7ca4758c8b0e.slice/cri-containerd-7577cb6bc8ce2a044a12f34ac8d549b94d11787febb6323af67fe7c7a2f14c5b.scope
+--- cpu.stat ---
+usage_usec 2801925888
+user_usec 2796807804
+system_usec 5118083
+core_sched.force_idle_usec 0
+nr_periods 35043
+nr_throttled 34354
+throttled_usec 668474215
+nr_bursts 0
+burst_usec 0
+--- cpu.max ---
+80000 100000
+
+Tearing down image-resize-cpu80...
+deployment.apps "image-resize-cpu80" deleted from openfaas-fn namespace
+service "image-resize-cpu80" deleted from openfaas-fn namespace
+Teardown complete. Remaining pods:
+redis-84d559556f-cg478   1/1   Running   0     20h
+
+═══════════════════════════════════════════
+image-resize @ 80% — DONE
+Finished: 2026-04-12T19:13:26Z
+═══════════════════════════════════════════
+```
+
+#### image-resize @ 80% — Summary
+
+| Rep | n | Mean | P50 | P95 | P99 | Min | Max | Errors |
+|-----|---|------|-----|-----|-----|-----|-----|--------|
+| 1   | 200 | 5741 | 5736 | 5787 | 5820 | 5697 | 5821 | 0 |
+| 2   | 200 | 5738 | 5733 | 5785 | 5844 | 5665 | 5847 | 0 |
+| 3   | 200 | 5745 | 5740 | 5800 | 5922 | 5696 | 5977 | 0 |
+| **Mean across reps** | — | **5741** | **5736** | **5791** | **5862** | — | — | **0** |
+
+#### CFS delta analysis for image-resize @ 80%
+
+Before (after warmup, before rep 1): `nr_periods=582 nr_throttled=569 usage_usec=46,253,549`
+After (after rep 3): `nr_periods=35,043 nr_throttled=34,354 usage_usec=2,801,925,888`
+
+**Deltas across the full 3-rep measurement window:**
+
+| Field | Delta | Interpretation |
+|---|---|---|
+| `usage_usec` | 2,755,672,339 | 2,755 s of CPU used by the function container |
+| `nr_periods` | 34,461 | 34,461 × 100 ms = **3,446 s** (57.4 min) of wall time |
+| `nr_throttled` | 33,785 | **98.0% throttle ratio** (33,785 / 34,461) |
+| `throttled_usec` | 657,351,655 | 657 s cumulative throttle delay |
+| **CPU utilization during periods** | 2755 / 3446 = **79.9%** | Matches the 80% quota exactly — pod is saturating its allowance |
+
+**Reading this:**
+
+- **Throttle ratio jumped from 14.8% (at 100%) to 98.0% (at 80%).** The moment we cut CPU below the level image-resize actually needs, the function becomes constantly quota-limited. Every CFS period, Pillow's resampling loop wants more than 80 ms of CPU time but only gets 80 ms, so it gets suspended at the quota boundary and resumes in the next period.
+- **CPU utilization (79.9%) exactly matches the quota ceiling (80%).** This is the signature of a fully CPU-bound workload against an exact ceiling. There is no idle time, no I/O wait — the container is always trying to run and always hitting the ceiling.
+- **The 98% throttle ratio combined with 79.9% utilization confirms the CFS scheduler is doing exactly what it says:** giving the container 80 ms of CPU per 100 ms period and suspending it for the remaining 20 ms.
+
+#### Degradation at 80%
+
+- **Baseline P95 (100%, 1000m):** 4611 ms
+- **Measured P95 (80%, 800m):** 5791 ms
+- **Degradation ratio:** 5791 / 4611 = **1.26×**
+- **CPU reduction:** 1000m → 800m = 1.25×
+
+**1.26 ≈ 1.25 — degradation is effectively perfectly linear at this operating point.** Cutting CPU by 1.25× slowed the function by 1.26×. This is the expected behaviour for a workload that is truly CPU-bound: total CPU-seconds needed is constant (Pillow has a fixed amount of work to do per image), and wall-clock time scales as `1 / cpu_fraction`.
+
+The degradation curve for image-resize is tracking the linear prediction precisely. Continuing to lower levels to validate that it holds all the way down.
+
+---
+
+### Step 2.P.11: Measure image-resize @ 60% (600m) — IN PROGRESS (2026-04-12)
+
+**Deployment start:** 2026-04-12 19:43 UTC. Background task `btwlwm23e`.
+
+**Expected runtime:** ~7.5 s/request × 200 × 3 = ~75 min.
+**Expected mean latency:** 4550 × (1/0.6) = 7583 ms (if linear).
+**Expected P95 degradation ratio:** ~1.67×.
+
+Pod deployed and warming up as of this log entry. Rep 1 has begun; 1 latency sample recorded so far.
+
+```
+kubectl get pods -n openfaas-fn --no-headers
+image-resize-cpu60-8f75dd748-62jg2   1/1   Running   0     35s
+redis-84d559556f-cg478               1/1   Running   0     20h
+```
+
+CFS stats before measurement (captured immediately after warmup) — [`results/phase2/image-resize_cpu60_cfs_before.txt`](results/phase2/image-resize_cpu60_cfs_before.txt).
+
+Full results for this level will be appended on completion.
+
+---
+
+### Phase 2 Proper — Progress So Far
+
+| Function | CPU % | CPU (milli) | Mean P95 (ms) | Degradation vs 100% | CFS throttle ratio | Status |
+|---|---|---|---|---|---|---|
+| image-resize | 100% | 1000m | 4611 | 1.00× | 14.8% | ✅ Complete |
+| image-resize | 80%  | 800m  | 5791 | 1.26× | 98.0% | ✅ Complete |
+| image-resize | 60%  | 600m  | —    | —     | —     | 🔄 Running |
+| image-resize | 40%  | 400m  | —    | —     | —     | ⏳ Pending |
+| image-resize | 20%  | 200m  | —    | —     | —     | ⏳ Pending |
+| db-query     | —    | —     | —    | —     | —     | ⏳ Pending |
+| log-filter   | —    | —     | —    | —     | —     | ⏳ Pending |
+
+**Key takeaway so far:** The two completed data points for image-resize (100% and 80%) show exactly the expected behaviour — near-perfect linear scaling of P95 latency with inverse CPU fraction, and a sharp transition in CFS throttle ratio (14.8% → 98%) the moment the quota drops below the function's natural CPU demand. The runner script infrastructure works reliably. Next levels are mechanical repetitions of the same flow.
+
+---
+
+### Files Created During Phase 2 Proper
+
+Artifacts that now live in the repo after this step (all created or modified in this phase):
+
+| Path | Purpose |
+|---|---|
+| [`functions/phase2-deploy-template.yaml`](functions/phase2-deploy-template.yaml) | `envsubst` template for variable-CPU K8s Deployment + Service |
+| [`scripts/run-phase2.sh`](scripts/run-phase2.sh) | Full-experiment runner (all 3 functions × 5 levels in one pass; kept for reference) |
+| [`scripts/run-level.sh`](scripts/run-level.sh) | Per-level runner (single function × single level; what we actually use) |
+| [`scripts/read-cfs.sh`](scripts/read-cfs.sh) | Standalone CFS stat reader (works around nested-SSH quoting) |
+| [`results/phase2/image-resize_cpu100_rep1.txt`](results/phase2/image-resize_cpu100_rep1.txt) | 200 latency samples at 1000m, rep 1 |
+| [`results/phase2/image-resize_cpu100_rep2.txt`](results/phase2/image-resize_cpu100_rep2.txt) | 200 latency samples at 1000m, rep 2 |
+| [`results/phase2/image-resize_cpu100_rep3.txt`](results/phase2/image-resize_cpu100_rep3.txt) | 200 latency samples at 1000m, rep 3 |
+| [`results/phase2/image-resize_cpu100_cfs.txt`](results/phase2/image-resize_cpu100_cfs.txt) | cpu.stat + cpu.max snapshot at 100% |
+| [`results/phase2/image-resize_cpu80_rep1.txt`](results/phase2/image-resize_cpu80_rep1.txt) | 200 latency samples at 800m, rep 1 |
+| [`results/phase2/image-resize_cpu80_rep2.txt`](results/phase2/image-resize_cpu80_rep2.txt) | 200 latency samples at 800m, rep 2 |
+| [`results/phase2/image-resize_cpu80_rep3.txt`](results/phase2/image-resize_cpu80_rep3.txt) | 200 latency samples at 800m, rep 3 |
+| [`results/phase2/image-resize_cpu80_cfs_before.txt`](results/phase2/image-resize_cpu80_cfs_before.txt) | cpu.stat before rep 1 at 80% |
+| [`results/phase2/image-resize_cpu80_cfs_after.txt`](results/phase2/image-resize_cpu80_cfs_after.txt) | cpu.stat after rep 3 at 80% |
+| [`results/phase2/image-resize_cpu60_cfs_before.txt`](results/phase2/image-resize_cpu60_cfs_before.txt) | cpu.stat before rep 1 at 60% (in-progress level) |
+| [`results/phase2/image-resize_cpu60_rep1.txt`](results/phase2/image-resize_cpu60_rep1.txt) | Latency samples (still accumulating) |
+
+**Files on AWS master but already mirrored locally:**
+
+| AWS path | Local mirror |
+|---|---|
+| `/home/ec2-user/phase2-deploy-template.yaml` | [`functions/phase2-deploy-template.yaml`](functions/phase2-deploy-template.yaml) |
+| `/home/ec2-user/run-phase2.sh` | [`scripts/run-phase2.sh`](scripts/run-phase2.sh) |
+| `/tmp/run-level.sh` | [`scripts/run-level.sh`](scripts/run-level.sh) |
+| `/tmp/read-cfs.sh` | [`scripts/read-cfs.sh`](scripts/read-cfs.sh) |
+| `/home/ec2-user/results/phase2/*` | [`results/phase2/`](results/phase2/) |
+
+**No orphan files on AWS** — every artifact created during this phase has been synced back to the local repo for eventual push to GitHub.

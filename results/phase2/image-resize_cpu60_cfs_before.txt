@@ -1,0 +1,14 @@
+Pod UID: 5b66777f-b7fc-4485-9d7a-71655ae04736 | Node: golgi-worker-3 (10.0.1.94)
+cgroup: /sys/fs/cgroup/kubepods.slice/kubepods-pod5b66777f_b7fc_4485_9d7a_71655ae04736.slice/cri-containerd-7a8f5a4d5a50680dd9194be662afed89bdde5b40be21c8a5fe3d8194685b9f0f.scope
+--- cpu.stat ---
+usage_usec 48089210
+user_usec 47968209
+system_usec 121000
+core_sched.force_idle_usec 0
+nr_periods 805
+nr_throttled 796
+throttled_usec 31389203
+nr_bursts 0
+burst_usec 0
+--- cpu.max ---
+60000 100000
