@@ -1222,14 +1222,30 @@ This reveals how the distribution shape changes — particularly the bimodal tra
 ### 7.7 Checkpoint: Phase 2 Complete
 
 ```
-[ ] 15 function variants deployed and measured (5 levels × 3 functions)
-[ ] 200 requests × 3 repetitions per variant = 9,000 total requests
-[ ] CFS throttling metrics recorded for all variants
+[~] 15 function variants deployed and measured (5 levels × 3 functions)
+    [x] image-resize @ 100% (1000m) — Mean P95 4611 ms (1.00× baseline)
+    [x] image-resize @ 80%  (800m)  — Mean P95 5791 ms (1.26×)
+    [~] image-resize @ 60%  (600m)  — Reps 1-2 P95 ≈ 8066 ms (1.75×, Rep 3 running)
+    [ ] image-resize @ 40%, @ 20%
+    [ ] db-query  @ 5 levels
+    [ ] log-filter @ 5 levels
+[~] 200 requests × 3 repetitions per variant = 9,000 total requests (1000+ done)
+[~] CFS throttling metrics recorded for all variants (image-resize 100/80% complete)
 [ ] Degradation curves plotted for all three profiles
 [ ] Throttle ratio vs degradation correlation computed
 [ ] Bimodal transition identified for log-filter
-[ ] All raw latency data saved to results/phase2/
+[~] All raw latency data saved to results/phase2/ (image-resize partial)
 ```
+
+**Early findings (image-resize, 2026-04-12):**
+
+| CPU % | CPU (m) | Mean P95 (ms) | Degradation | Predicted (1/x) | CFS throttle ratio |
+|---|---|---|---|---|---|
+| 100% | 1000 | 4611 | 1.00× | 1.00× | 14.8% |
+| 80%  | 800  | 5791 | 1.26× | 1.25× | 98.0% |
+| 60%  | 600  | ~8066 (reps 1-2) | 1.75× | 1.67× | TBD |
+
+The 100% baseline matches Phase 1 (4591 ms) within 0.7%, validating Phase 2 infrastructure. The 80% point matches the linear inverse-quota prediction within 1%, and the CFS throttle ratio jumps from 14.8% → 98% — direct evidence that CFS bandwidth enforcement is the mechanism (RQ2). The 60% point shows the **first super-linear deviation** (+6% over linear), suggesting queueing effects begin compounding throttling once the quota drops well below natural CPU demand.
 
 **Estimated time: 1-2 days**
 
@@ -1686,7 +1702,8 @@ in which the container exhausted its CPU quota.
 [ ] Phase 4 — Report Writing and Demo
 ```
 
-**Total measurement effort remaining:** ~9,000 requests (Phase 2)
+**Phase 2 progress:** image-resize 100% ✅, 80% ✅, 60% 🔄 (Reps 1-2 done), 40%/20% pending; db-query and log-filter pending.
+**Total measurement effort remaining:** ~8,000 requests (Phase 2)
 **Estimated time remaining:** ~1 week
 **Target:** Characterize how CFS quota enforcement creates profile-dependent latency degradation under overcommitment, and determine whether the degradation patterns are mechanistically explainable
 

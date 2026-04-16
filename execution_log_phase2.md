@@ -13,6 +13,7 @@ This document tracks the execution of Phase 2 — Multi-Level Degradation Curves
 
 ## Table of Contents
 
+- [Infrastructure Reference (from Phase 0 / Phase 1)](#infrastructure-reference-from-phase-0--phase-1)
 - [Pre-Phase-2: CPU Burst Size Measurement](#pre-phase-2-cpu-burst-size-measurement)
   - [Step 2.0: Motivation and Experimental Design](#step-20-motivation-and-experimental-design)
   - [Step 2.1: Verify Infrastructure State](#step-21-verify-infrastructure-state--completed-2026-04-12)
@@ -22,6 +23,21 @@ This document tracks the execution of Phase 2 — Multi-Level Degradation Curves
   - [Step 2.5: Measure log-filter (Non-OC, 500m)](#step-25-measure-log-filter-non-oc-500m--completed-2026-04-12)
   - [Step 2.6: Cross-Variant Comparison and Interpretation](#step-26-cross-variant-comparison-and-interpretation)
   - [Pre-Phase-2 Checkpoint](#pre-phase-2-checkpoint)
+- [What Comes Next](#what-comes-next)
+- [Phase 2 Proper: Multi-Level Degradation Curves](#phase-2-proper-multi-level-degradation-curves)
+  - [Step 2.P.1: Verify infrastructure state](#step-2p1-verify-infrastructure-state--completed-2026-04-12)
+  - [Step 2.P.2: Create parameterized deployment manifest](#step-2p2-create-parameterized-deployment-manifest--completed-2026-04-12)
+  - [Step 2.P.3: Create initial runner script (superseded)](#step-2p3-create-initial-runner-script--superseded-2026-04-12)
+  - [Step 2.P.4: Deploy artifacts to master node](#step-2p4-deploy-artifacts-to-master-node--completed-2026-04-12)
+  - [Step 2.P.5: Copy SSH key to master for worker cgroup access](#step-2p5-copy-ssh-key-to-master-for-worker-cgroup-access--completed-2026-04-12)
+  - [Step 2.P.6: Phase 1 teardown](#step-2p6-phase-1-teardown--completed-2026-04-12)
+  - [Step 2.P.7: Measure image-resize @ 100% (baseline sanity check)](#step-2p7-measure-image-resize--100-1000m-baseline-sanity-check--completed-2026-04-12)
+  - [Step 2.P.8: Record CFS stats for cpu100 (workaround)](#step-2p8-record-cfs-stats-for-cpu100--initial-inline-approach-failed-workaround-created--completed-2026-04-12)
+  - [Step 2.P.9: Create per-level runner script](#step-2p9-create-per-level-runner-script--completed-2026-04-12)
+  - [Step 2.P.10: Measure image-resize @ 80% (800m)](#step-2p10-measure-image-resize--80-800m--completed-2026-04-12)
+  - [Step 2.P.11: Measure image-resize @ 60% (600m)](#step-2p11-measure-image-resize--60-600m--in-progress-2026-04-12)
+  - [Phase 2 Proper — Progress So Far](#phase-2-proper--progress-so-far)
+  - [Files Created During Phase 2 Proper](#files-created-during-phase-2-proper)
 
 ---
 
@@ -1693,7 +1709,172 @@ redis-84d559556f-cg478               1/1   Running   0     20h
 
 CFS stats before measurement (captured immediately after warmup) — [`results/phase2/image-resize_cpu60_cfs_before.txt`](results/phase2/image-resize_cpu60_cfs_before.txt).
 
-Full results for this level will be appended on completion.
+**Reps 1 and 2 complete (Rep 3 still running at time of writing):**
+
+```
+=== Rep 1/3: image-resize @ 60% ===
+Start: 2026-04-12T19:43:24Z
+  Progress: 50/200 — last: 7995ms
+  Progress: 100/200 — last: 7930ms
+  Progress: 150/200 — last: 8011ms
+  Progress: 200/200 — last: 7909ms
+End: 2026-04-12T20:09:56Z
+Errors: 0
+Rep1: n=200 mean=7960 p50=7953 p95=8069 p99=8108 min=7891 max=8115
+
+=== Rep 2/3: image-resize @ 60% ===
+Start: 2026-04-12T20:09:56Z
+  Progress: 50/200 — last: 7953ms
+  Progress: 100/200 — last: 7967ms
+  Progress: 150/200 — last: 7960ms
+  Progress: 200/200 — last: 7917ms
+End: 2026-04-12T20:36:27Z
+Errors: 0
+Rep2: n=200 mean=7953 p50=7946 p95=8064 p99=8095 min=7840 max=8174
+```
+
+| Rep | n | Mean (ms) | P50 | P95 | P99 | Min | Max | Errors |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 200 | 7960 | 7953 | 8069 | 8108 | 7891 | 8115 | 0 |
+| 2 | 200 | 7953 | 7946 | 8064 | 8095 | 7840 | 8174 | 0 |
+| 3 | 200 | 7954 | 7956 | 8027 | 8086 | 7853 | 8104 | 0 |
+| **Mean** | — | **7956** | **7952** | **8053** | **8096** | — | — | **0** |
+
+**Rep 3 completed at 21:02:18 UTC; pod torn down 21:03 UTC.** Full three-rep window ran 19:43:24 → 21:02:18, ≈79 min of pure measurement time.
+
+**CFS stats after Rep 3** — [`results/phase2/image-resize_cpu60_cfs_after.txt`](results/phase2/image-resize_cpu60_cfs_after.txt):
+
+```
+usage_usec     2912583435
+user_usec      2906884458
+system_usec       5698976
+nr_periods          48553
+nr_throttled        48509
+throttled_usec 1920529312
+cpu.max        60000 100000
+```
+
+**CFS deltas over the 3-rep window (after − before):**
+
+| Metric | Before | After | Δ |
+|---|---|---|---|
+| nr_periods | 805 | 48553 | **47 748** |
+| nr_throttled | 796 | 48509 | **47 713** |
+| throttled_usec | 31 389 203 | 1 920 529 312 | **1 889 140 109** (≈ 1 889 s) |
+| usage_usec | 48 089 210 | 2 912 583 435 | **2 864 494 225** (≈ 2 864 s) |
+
+- **Throttle ratio:** 47 713 / 47 748 = **99.93%** — virtually every single 100 ms period was throttled.
+- **Quota utilization:** 2 864.5 s used / (47 748 × 60 ms) = 2 864.5 / 2 864.9 = **99.99%** — the pod consumes its 60 ms quota entirely inside every period and then sits idle waiting for the next refill.
+- **Throttled time fraction:** 1 889 / (1 889 + 2 864) = **39.7%** of wall time was spent blocked on throttling — almost the exact inverse of the 60% quota, as CFS theory predicts.
+
+**Observations — full 60% level:**
+
+- Inter-rep variance across all 3 reps is tiny: ΔP95 max 42 ms, ΔMean max 7 ms. CFS throttling is **fully deterministic** once the pod is permanently quota-bound.
+- **Mean P95 = 8053 ms**, **degradation vs 100% baseline = 8053 / 4611 = 1.747× ≈ 1.75×** (predicted from inverse-quota 1/0.6 = 1.667×). Actual is **~4.8% worse** than the pure linear model — modest but consistent super-linearity, likely from request arrivals occasionally landing in already-exhausted periods and waiting an extra slice.
+- **CFS throttle ratio jump: 98.0% → 99.93%** from 80% → 60%. The controller is saturated at both points; the distinguishing signal at 60% is the *throttled_usec/wall_time* ratio rising from ~21% to ~40%, directly mirroring the quota cut.
+- **Errors: 0 / 600 requests.** 60s `--max-time` ceiling still comfortable at ~8 s per request.
+- Per-request time holds at ~7956 ms. With max_inflight=4 and 4 concurrent client workers, every request is fully serialized by CFS — no queue parallelism remains.
+
+---
+
+### Step 2.P.12 — image-resize @ 40% (400m CPU, 512Mi mem)
+
+**Initial deploy attempt failed** — wrong image name `ghcr.io/openfaas/image-resize:latest` passed to `run-level.sh` → `ImagePullBackOff` (403 Forbidden from ghcr.io). The images are pre-imported into containerd on each worker under the `golgi/*` namespace. Correct image: `golgi/image-resize:v1.0`.
+
+**Fix:** Deleted failed deployment, relaunched with correct image:
+
+```bash
+kubectl delete deployment image-resize-cpu40 -n openfaas-fn --ignore-not-found=true
+kubectl delete service image-resize-cpu40 -n openfaas-fn --ignore-not-found=true
+nohup bash /tmp/run-level.sh image-resize 40 400 512 golgi/image-resize:v1.0 \
+  > /home/ec2-user/phase2_cpu40.log 2>&1 &
+```
+
+Pod deployed successfully: `image-resize-cpu40-56bc84c878-zbhwm` on golgi-worker-3.
+
+**Full output:**
+
+```
+═══════════════════════════════════════════
+image-resize @ 40% (400m CPU, 512Mi mem)
+Deploy: image-resize-cpu40
+Started: 2026-04-12T21:25:47Z
+═══════════════════════════════════════════
+deployment "image-resize-cpu40" successfully rolled out
+Pod: image-resize-cpu40-56bc84c878-zbhwm   1/1   Running   0     5s    10.42.3.12   golgi-worker-3
+Warmup done.
+
+=== Rep 1/3: image-resize @ 40% ===
+Start: 2026-04-12T21:27:46Z
+  Progress: 50/200 — last: 11284ms
+  Progress: 100/200 — last: 11301ms
+  Progress: 150/200 — last: 11387ms
+  Progress: 200/200 — last: 11392ms
+End: 2026-04-12T22:05:37Z
+Errors: 0
+
+=== Rep 2/3: image-resize @ 40% ===
+Start: 2026-04-12T22:05:37Z
+  Progress: 50/200 — last: 11470ms
+  Progress: 100/200 — last: 11312ms
+  Progress: 150/200 — last: 11304ms
+  Progress: 200/200 — last: 11311ms
+End: 2026-04-12T22:43:28Z
+Errors: 0
+
+=== Rep 3/3: image-resize @ 40% ===
+Start: 2026-04-12T22:43:28Z
+  Progress: 50/200 — last: 11363ms
+  Progress: 100/200 — last: 11392ms
+  Progress: 150/200 — last: 11297ms
+  Progress: 200/200 — last: 11380ms
+End: 2026-04-12T23:21:20Z
+Errors: 0
+
+image-resize @ 40% — DONE
+Finished: 2026-04-12T23:21:30Z
+```
+
+Wall-time per rep: ~38 min each (21:27 → 22:05 → 22:43 → 23:21). Total measurement window: ~113 min.
+
+| Rep | n | Mean (ms) | P50 | P95 | P99 | Min | Max | Errors |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 200 | 11353 | 11346 | 11494 | 11556 | 11212 | 11577 | 0 |
+| 2 | 200 | 11353 | 11318 | 11497 | 11585 | 11221 | 11665 | 0 |
+| 3 | 200 | 11357 | 11315 | 11496 | 11580 | 11221 | 11680 | 0 |
+| **Mean** | — | **11354** | **11326** | **11496** | **11574** | — | — | **0** |
+
+**CFS stats after Rep 3** — [`results/phase2/image-resize_cpu40_cfs_after.txt`](results/phase2/image-resize_cpu40_cfs_after.txt):
+
+```
+usage_usec     2771230654
+user_usec      2766056335
+system_usec       5174319
+nr_periods          69288
+nr_throttled        69184
+throttled_usec 4155641966
+cpu.max        40000 100000
+```
+
+**CFS deltas over the 3-rep window (after − before):**
+
+| Metric | Before | After | Δ |
+|---|---|---|---|
+| nr_periods | 1 148 | 69 288 | **68 140** |
+| nr_throttled | 1 081 | 69 184 | **68 103** |
+| throttled_usec | 64 953 707 | 4 155 641 966 | **4 090 688 259** (≈ 4 091 s) |
+| usage_usec | 45 717 271 | 2 771 230 654 | **2 725 513 383** (≈ 2 726 s) |
+
+- **Throttle ratio:** 68 103 / 68 140 = **99.95%** — every period throttled.
+- **Quota utilization:** 2 725.5 s / (68 140 × 40 ms) = 2 725.5 / 2 725.6 = **99.996%** — saturated.
+- **Throttled time fraction:** 4 091 / (4 091 + 2 726) = **60.0%** of wall time spent throttled — mirrors (1 − 0.4) = 0.6, exactly as CFS theory predicts.
+
+**Observations — full 40% level:**
+
+- Inter-rep variance essentially zero: ΔP95 = 3 ms, ΔMean = 4 ms across 600 samples. CFS throttling at this depth produces machine-like determinism.
+- **Mean P95 = 11 496 ms**, **degradation vs 100% baseline = 11 496 / 4 611 = 2.493× ≈ 2.49×** (predicted from inverse-quota 1/0.4 = 2.50×). This is within **0.4%** of the linear model — tighter than 60% (4.8% off) and 80% (0.8% off).
+- The trend across levels is clear: at deeper throttling, CFS becomes *more* deterministic and the inverse-quota model becomes *more* accurate, because there is zero scheduler wiggle room left. The mild super-linearity at 60% was a transient effect.
+- **Errors: 0 / 600 requests.** 60s `--max-time` still has 5× headroom at ~11.4 s per request.
 
 ---
 
@@ -1703,13 +1884,13 @@ Full results for this level will be appended on completion.
 |---|---|---|---|---|---|---|
 | image-resize | 100% | 1000m | 4611 | 1.00× | 14.8% | ✅ Complete |
 | image-resize | 80%  | 800m  | 5791 | 1.26× | 98.0% | ✅ Complete |
-| image-resize | 60%  | 600m  | —    | —     | —     | 🔄 Running |
-| image-resize | 40%  | 400m  | —    | —     | —     | ⏳ Pending |
+| image-resize | 60%  | 600m  | 8053 | 1.75× | 99.93% | ✅ Complete |
+| image-resize | 40%  | 400m  | 11496 | 2.49× | 99.95% | ✅ Complete |
 | image-resize | 20%  | 200m  | —    | —     | —     | ⏳ Pending |
 | db-query     | —    | —     | —    | —     | —     | ⏳ Pending |
 | log-filter   | —    | —     | —    | —     | —     | ⏳ Pending |
 
-**Key takeaway so far:** The two completed data points for image-resize (100% and 80%) show exactly the expected behaviour — near-perfect linear scaling of P95 latency with inverse CPU fraction, and a sharp transition in CFS throttle ratio (14.8% → 98%) the moment the quota drops below the function's natural CPU demand. The runner script infrastructure works reliably. Next levels are mechanical repetitions of the same flow.
+**Key takeaway so far:** Four completed levels for image-resize (100% → 80% → 60% → 40%) show near-perfect inverse-quota scaling of P95 latency (1.00× → 1.26× → 1.75× → 2.49×, vs predicted 1.00× → 1.25× → 1.67× → 2.50×). CFS throttle ratio jumps from 14.8% to ≥98% the moment quota drops below the function's natural CPU demand. The 20% level is next, then db-query and log-filter sweeps.
 
 ---
 
@@ -1732,8 +1913,16 @@ Artifacts that now live in the repo after this step (all created or modified in 
 | [`results/phase2/image-resize_cpu80_rep3.txt`](results/phase2/image-resize_cpu80_rep3.txt) | 200 latency samples at 800m, rep 3 |
 | [`results/phase2/image-resize_cpu80_cfs_before.txt`](results/phase2/image-resize_cpu80_cfs_before.txt) | cpu.stat before rep 1 at 80% |
 | [`results/phase2/image-resize_cpu80_cfs_after.txt`](results/phase2/image-resize_cpu80_cfs_after.txt) | cpu.stat after rep 3 at 80% |
-| [`results/phase2/image-resize_cpu60_cfs_before.txt`](results/phase2/image-resize_cpu60_cfs_before.txt) | cpu.stat before rep 1 at 60% (in-progress level) |
-| [`results/phase2/image-resize_cpu60_rep1.txt`](results/phase2/image-resize_cpu60_rep1.txt) | Latency samples (still accumulating) |
+| [`results/phase2/image-resize_cpu60_rep1.txt`](results/phase2/image-resize_cpu60_rep1.txt) | 200 latency samples at 600m, rep 1 |
+| [`results/phase2/image-resize_cpu60_rep2.txt`](results/phase2/image-resize_cpu60_rep2.txt) | 200 latency samples at 600m, rep 2 |
+| [`results/phase2/image-resize_cpu60_rep3.txt`](results/phase2/image-resize_cpu60_rep3.txt) | 200 latency samples at 600m, rep 3 |
+| [`results/phase2/image-resize_cpu60_cfs_before.txt`](results/phase2/image-resize_cpu60_cfs_before.txt) | cpu.stat before rep 1 at 60% |
+| [`results/phase2/image-resize_cpu60_cfs_after.txt`](results/phase2/image-resize_cpu60_cfs_after.txt) | cpu.stat after rep 3 at 60% |
+| [`results/phase2/image-resize_cpu40_rep1.txt`](results/phase2/image-resize_cpu40_rep1.txt) | 200 latency samples at 400m, rep 1 |
+| [`results/phase2/image-resize_cpu40_rep2.txt`](results/phase2/image-resize_cpu40_rep2.txt) | 200 latency samples at 400m, rep 2 |
+| [`results/phase2/image-resize_cpu40_rep3.txt`](results/phase2/image-resize_cpu40_rep3.txt) | 200 latency samples at 400m, rep 3 |
+| [`results/phase2/image-resize_cpu40_cfs_before.txt`](results/phase2/image-resize_cpu40_cfs_before.txt) | cpu.stat before rep 1 at 40% |
+| [`results/phase2/image-resize_cpu40_cfs_after.txt`](results/phase2/image-resize_cpu40_cfs_after.txt) | cpu.stat after rep 3 at 40% |
 
 **Files on AWS master but already mirrored locally:**
 

@@ -248,7 +248,13 @@ Direct cgroup v2 `cpu.stat` measurement to determine per-request CPU consumption
 - [x] **Phase 1:** Benchmark deployment and baseline characterization — 6 function variants, 1,200 latency measurements, SLO thresholds established, 5 plots generated
 - [x] **Pre-Phase 2:** CPU burst measurement — 7.7ms burst size determined, bimodality mechanism validated (RQ2 answered)
 - [x] **Report:** Sections 1-3 drafted (Introduction, Background, Experimental Design)
-- [ ] **Phase 2:** Multi-level degradation curves — 5 CPU levels x 3 functions x 200 requests x 3 reps = 9,000 requests (RQ1) **(in progress)**
+- [~] **Phase 2:** Multi-level degradation curves — 5 CPU levels x 3 functions x 200 requests x 3 reps = 9,000 requests (RQ1) **(in progress)**
+  - [x] image-resize @ 100% (1000m) — Mean P95 **4611 ms** (1.00× baseline, matches Phase 1 within 0.7%)
+  - [x] image-resize @ 80% (800m) — Mean P95 **5791 ms** (**1.26×**, matches linear inverse-quota prediction; CFS throttle ratio jumps 14.8% → 98%)
+  - [~] image-resize @ 60% (600m) — Reps 1-2 P95 ≈ **8066 ms** (**1.75×** vs predicted 1.67× — first super-linear deviation, Rep 3 running)
+  - [ ] image-resize @ 40%, @ 20%
+  - [ ] db-query at 5 levels (expected: flat curve, I/O-bound)
+  - [ ] log-filter at 5 levels (expected: step function at CFS boundaries, Pre-Phase 2 burst measurement = 7.7 ms)
 - [ ] **Phase 3:** Analysis and visualization — degradation curve plots, throttle correlation, statistical tests
 - [ ] **Phase 4:** Final report and presentation
 
