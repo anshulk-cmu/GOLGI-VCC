@@ -1,26 +1,19 @@
-# Characterizing the Impact of Resource Overcommitment on Serverless Function Latency Across Workload Profiles
+# Characterizing the Impact of Resource Overcommitment on <br/> Serverless Function Latency Across Workload Profiles
 
-<br/>
-<table width="100%" style="border:none; margin-top:10pt; margin-bottom:10pt;">
-<tr><td align="center" style="border:none; padding:6pt 0;">
-<span style="font-size:10pt; color:#444;">CSL7510 &mdash; Cloud Computing</span>
+<table width="100%" style="border:none; margin-top:4pt; margin-bottom:16pt;">
+<tr><td align="center" style="border:none; padding:2pt 0;">
+<b><span style="font-size:13pt;">CSL7510 &mdash; Cloud Computing</span></b>
 </td></tr>
 <tr><td align="center" style="border:none; padding:14pt 0 4pt 0;">
-<span style="font-size:11pt;">Anshul Kumar (M25AI2036)</span>
+<span style="font-size:11pt;">Anshul Kumar (M25AI2036), Neha Prasad (M25AI2056), Kirtiman Sarangi (G25AI1024)</span>
+</td></tr>
+<tr><td align="center" style="border:none; padding:10pt 0 2pt 0;">
+<b><span style="font-size:11pt;">M.Tech Artificial Intelligence</span></b>
 </td></tr>
 <tr><td align="center" style="border:none; padding:2pt 0;">
-<span style="font-size:11pt;">Neha Prasad (M25AI2056)</span>
+<b><span style="font-size:11pt;">Indian Institute of Technology Jodhpur</span></b>
 </td></tr>
-<tr><td align="center" style="border:none; padding:2pt 0;">
-<span style="font-size:11pt;">Kirtiman Sarangi (G25AI1024)</span>
-</td></tr>
-<tr><td align="center" style="border:none; padding:12pt 0 2pt 0;">
-<span style="font-size:10pt;">M.Tech Artificial Intelligence</span>
-</td></tr>
-<tr><td align="center" style="border:none; padding:2pt 0;">
-<span style="font-size:10pt;">Indian Institute of Technology Jodhpur</span>
-</td></tr>
-<tr><td align="center" style="border:none; padding:10pt 0 0 0;">
+<tr><td align="center" style="border:none; padding:8pt 0 0 0;">
 <span style="font-size:10pt; color:#555;">April 2026</span>
 </td></tr>
 </table>

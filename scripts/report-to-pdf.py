@@ -68,10 +68,11 @@ full_html = f"""<!DOCTYPE html>
     color: #1a1a1a;
   }}
   h1 {{
-    font-size: 16pt;
+    font-size: 22pt;
     text-align: center;
     margin-top: 0;
-    margin-bottom: 6pt;
+    margin-bottom: 2pt;
+    line-height: 1.3;
   }}
   h2 {{
     font-size: 14pt;
