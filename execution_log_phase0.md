@@ -2573,4 +2573,32 @@ HTTP 200
 
 ---
 
-**Phase 0 is complete. Ready to proceed to Phase 1 — Benchmark Functions.**
+**Phase 0 is complete. Proceeded to Phase 1 — Benchmark Functions.**
+
+---
+
+### Infrastructure Teardown — 2026-04-16
+
+After all experiments (Phase 1 + Phase 2) were completed, the entire AWS infrastructure was torn down on 2026-04-16 to stop ongoing costs (~$70 total spend):
+
+```bash
+# Terminate all 5 EC2 instances
+aws ec2 terminate-instances --instance-ids \
+  i-07c1c3c65c833a675 i-0fb0f2ac6384d779f i-02c851cc663d17b3e \
+  i-0485789851116b85e i-07b31e765e0ff1b45
+
+# Delete VPC resources in dependency order
+aws ec2 delete-subnet --subnet-id subnet-059304ec96b5a1958
+aws ec2 delete-route-table --route-table-id rtb-072e903ac57d41747
+aws ec2 delete-security-group --group-id sg-06b976c1028e80262
+aws ec2 detach-internet-gateway --internet-gateway-id igw-050cd44d34503b9ec --vpc-id vpc-0613c37c5cde4ea3c
+aws ec2 delete-internet-gateway --internet-gateway-id igw-050cd44d34503b9ec
+aws ec2 delete-vpc --vpc-id vpc-0613c37c5cde4ea3c
+aws ec2 delete-key-pair --key-pair-id key-092b756385654f58b
+```
+
+**Verification:** All resource queries returned empty — zero EC2 instances, zero VPCs, zero key pairs, zero EIPs, zero NAT gateways, zero EBS volumes, zero load balancers.
+
+All experimental data and code artifacts were synced to the local repo before teardown. No orphan files remain on AWS.
+
+**Infrastructure timeline:** Provisioned 2026-04-11, torn down 2026-04-16 (5 days).
